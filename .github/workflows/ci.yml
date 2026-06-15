@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools (best-effort)
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+            # shfmt via Go (preinstalled on runners) for the formatter round-trip
+            GOBIN="$HOME/.local/bin" go install mvdan.cc/sh/v3/cmd/shfmt@latest || true
+          else
+            brew install shellcheck shfmt || true
+          fi
+          # ruff for the format round-trip check (optional; smoke self-skips if absent)
+          pipx install ruff || python3 -m pip install --user ruff || true
+          mkdir -p "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: ShellCheck (required)
+        # gate on warning+; info-level checks (e.g. SC2015) vary by shellcheck
+        # version across runners and are advisory, not build-breaking.
+        run: shellcheck --severity=warning scripts/* install.sh tests/smoke.sh
+
+      - name: Smoke tests (required)
+        run: tests/smoke.sh

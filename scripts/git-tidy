@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+# git-tidy — across a directory of repos: prune stale remote-tracking refs and
+#            delete local branches already merged into origin's default branch.
+#            DRY-RUN by default; pass -f to actually delete.
+#
+# Usage:
+#   git-tidy [DIR]         show what would be pruned/deleted (default: cwd)
+#   git-tidy -f [DIR]      actually prune + delete merged branches
+#   git tidy [DIR]         same (git discovers git-* on PATH)
+#   git-tidy -h            help
+#
+# Never deletes the current branch or the default branch. "Merged" means fully
+# contained in origin's default branch (origin/main or origin/master).
+set -u
+
+FORCE=0
+case "${1:-}" in
+-h | --help)
+    awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$0"
+    exit 0
+    ;;
+-f | --force)
+    FORCE=1
+    shift
+    ;;
+esac
+
+root="${1:-.}"
+[ -d "$root" ] || {
+    echo "git-tidy: not a directory: $root" >&2
+    exit 1
+}
+
+# Tokyo Night palette (24-bit truecolor); honors NO_COLOR and non-TTY output.
+# shellcheck disable=SC2034  # shared palette; not every color is used in each tool
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    R=$'\033[38;2;247;118;142m'      # red     #f7768e
+    G=$'\033[38;2;158;206;106m'      # green   #9ece6a
+    Y=$'\033[38;2;224;175;104m'      # yellow  #e0af68
+    DIM=$'\033[38;2;86;95;137m'      # comment #565f89
+    BOLD=$'\033[1;38;2;192;202;245m' # fg bold #c0caf5
+    Z=$'\033[0m'
+else
+    R=
+    G=
+    Y=
+    DIM=
+    BOLD=
+    Z=
+fi
+
+repos=()
+for d in "$root"/*/; do
+    [ -d "$d/.git" ] || git -C "$d" rev-parse --git-dir >/dev/null 2>&1 || continue
+    repos+=("${d%/}")
+done
+[ ${#repos[@]} -eq 0 ] && {
+    echo "git-tidy: no git repositories under '$root'" >&2
+    exit 1
+}
+
+[ "$FORCE" -eq 0 ] && printf '%s(dry run — nothing deleted; pass -f to apply)%s\n' "$DIM" "$Z"
+
+# Each repo is independent and the `remote prune --dry-run` below makes a
+# network call, so we analyze repos concurrently. Each worker writes its human
+# output plus a trailing "@@T <del> <prune>" tally line to an index-named temp
+# file; the main loop reads them back in directory order, prints everything but
+# the tally line, and sums the counts.
+analyze() {
+    local repo="$1" out="$2" name def defbranch cur stale merged s b d=0 p=0
+    name="$(basename "$repo")"
+    g() { git -C "$repo" "$@" 2>/dev/null; }
+    {
+        if ! g remote | grep -qx origin; then
+            printf "%s%s%s  %sno origin%s\n" "$BOLD" "$name" "$Z" "$DIM" "$Z"
+            printf '@@T 0 0\n'
+            exit 0
+        fi
+
+        def="$(g symbolic-ref --short refs/remotes/origin/HEAD)"
+        [ -z "$def" ] && {
+            g remote set-head origin --auto >/dev/null 2>&1
+            def="$(g symbolic-ref --short refs/remotes/origin/HEAD)"
+        }
+        [ -z "$def" ] && for c in origin/main origin/master; do g rev-parse --verify "$c" >/dev/null 2>&1 && def="$c" && break; done
+        [ -z "$def" ] && {
+            printf "%s%s%s  %sno default branch%s\n" "$BOLD" "$name" "$Z" "$DIM" "$Z"
+            printf '@@T 0 0\n'
+            exit 0
+        }
+        defbranch="${def#origin/}"
+        cur="$(g symbolic-ref --short HEAD)"
+
+        stale="$(g remote prune origin --dry-run | sed -n 's#.*\[would prune\] *origin/##p')"
+        if [ -n "$cur" ]; then
+            merged="$(g branch --format='%(refname:short)' --merged "$def" |
+                grep -vxF "$defbranch" | grep -vxF "$cur")"
+        else
+            merged="$(g branch --format='%(refname:short)' --merged "$def" |
+                grep -vxF "$defbranch")"
+        fi
+
+        [ -z "$stale" ] && [ -z "$merged" ] && {
+            printf '@@T 0 0\n'
+            exit 0
+        }
+        printf "%s%s%s  %s(branch: %s, default: %s)%s\n" "$BOLD" "$name" "$Z" "$DIM" "${cur:-detached}" "$defbranch" "$Z"
+
+        if [ -n "$stale" ]; then
+            while IFS= read -r s; do [ -n "$s" ] && {
+                printf "  %sprune ref%s origin/%s\n" "$Y" "$Z" "$s"
+                p=$((p + 1))
+            }; done <<<"$stale"
+            [ "$FORCE" -eq 1 ] && g remote prune origin >/dev/null 2>&1
+        fi
+        if [ -n "$merged" ]; then
+            while IFS= read -r b; do
+                [ -z "$b" ] && continue
+                if [ "$FORCE" -eq 1 ]; then
+                    if g branch -d "$b" >/dev/null 2>&1; then
+                        printf "  %sdeleted%s   %s\n" "$R" "$Z" "$b"
+                        d=$((d + 1))
+                    fi
+                else
+                    printf "  %swould del%s %s\n" "$R" "$Z" "$b"
+                    d=$((d + 1))
+                fi
+            done <<<"$merged"
+        fi
+        printf '@@T %d %d\n' "$d" "$p"
+    } >"$out"
+}
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+nproc=8
+j=0
+for i in "${!repos[@]}"; do
+    printf -v idx '%05d' "$i"
+    analyze "${repos[$i]}" "$tmp/$idx" &
+    j=$((j + 1))
+    [ $((j % nproc)) -eq 0 ] && wait
+done
+wait
+
+ndel=0
+nprune=0
+for i in "${!repos[@]}"; do
+    printf -v idx '%05d' "$i"
+    [ -f "$tmp/$idx" ] || continue
+    while IFS= read -r ln; do
+        # shellcheck disable=SC2086  # $ln is our own "@@T N N" marker — intentional split
+        case "$ln" in
+        '@@T '*)
+            set -- $ln
+            ndel=$((ndel + $2))
+            nprune=$((nprune + $3))
+            ;;
+        *) printf '%s\n' "$ln" ;;
+        esac
+    done <"$tmp/$idx"
+done
+
+if [ "$FORCE" -eq 1 ]; then
+    printf "${DIM}— deleted %d branches · pruned %d refs${Z}\n" "$ndel" "$nprune"
+else
+    printf "${DIM}— %d branches + %d refs would be removed · run with -f to apply${Z}\n" "$ndel" "$nprune"
+fi

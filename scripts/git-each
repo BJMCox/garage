@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+# git-each — run the same command in every repo under a directory, in parallel,
+#            with a per-repo header. The workhorse for "do X across all repos".
+#
+# Usage:
+#   git-each <git-args...>        run `git <git-args>` in each repo (default: cwd)
+#   git-each -s '<shell cmd>'     run a shell command in each repo instead
+#   git-each -d DIR <args...>     scan repos under DIR instead of cwd
+#   git each <git-args...>        same (git discovers git-* on PATH)
+#   git-each -h                   help
+#
+# Examples:
+#   git-each gc --auto                 # housekeeping everywhere
+#   git-each switch main               # checkout main in every repo
+#   git-each -s 'wc -l *.md'           # arbitrary shell per repo
+#   git-each -d ~/projects fetch --all  # operate on repos under a given dir
+#
+# WARNING: -s runs an ARBITRARY shell command in every repo — only run trusted
+# commands. Pass the command as a single quoted argument (e.g. -s 'wc -l *.md').
+#
+# Output is grouped per repo (parallel runs go to temp files, printed in
+# directory order). NON-INTERACTIVE commands only — anything that needs a TTY
+# (editor, pager, prompts) will misbehave under parallel capture. Companion to
+# git-ahead / git-sync-all / git-status-all.
+set -u
+
+SHELL_MODE=0
+root="."
+while [ $# -gt 0 ]; do
+    case "$1" in
+    -h | --help)
+        awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$0"
+        exit 0
+        ;;
+    -s | --shell)
+        SHELL_MODE=1
+        shift
+        ;;
+    -d | --dir)
+        [ -n "${2:-}" ] || {
+            echo "git-each: -d requires a directory argument" >&2
+            exit 1
+        }
+        root="$2"
+        shift 2
+        ;;
+    --)
+        shift
+        break
+        ;;
+    -*)
+        echo "git-each: unknown flag: $1" >&2
+        exit 1
+        ;;
+    *) break ;;
+    esac
+done
+[ -d "$root" ] || {
+    echo "git-each: not a directory: $root" >&2
+    exit 1
+}
+[ $# -eq 0 ] && {
+    echo "git-each: no command given (try -h)" >&2
+    exit 1
+}
+
+# Tokyo Night palette (24-bit truecolor); honors NO_COLOR and non-TTY output.
+# shellcheck disable=SC2034  # shared palette; not every color is used in each tool
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    R=$'\033[38;2;247;118;142m'      # red     #f7768e
+    G=$'\033[38;2;158;206;106m'      # green   #9ece6a
+    DIM=$'\033[38;2;86;95;137m'      # comment #565f89
+    BOLD=$'\033[1;38;2;192;202;245m' # fg bold #c0caf5
+    Z=$'\033[0m'
+else
+    R=
+    G=
+    DIM=
+    BOLD=
+    Z=
+fi
+
+repos=()
+for d in "$root"/*/; do
+    [ -d "$d/.git" ] || git -C "$d" rev-parse --git-dir >/dev/null 2>&1 || continue
+    repos+=("${d%/}")
+done
+[ ${#repos[@]} -eq 0 ] && {
+    echo "git-each: no git repositories under '$root'" >&2
+    exit 1
+}
+
+# --- run command per repo (parallel); index-named temp files keep print order ---
+# Each worker writes its header + captured command output to "$out", and the
+# command's exit status to a separate sidecar "$out.rc". The rc is kept OUT of
+# the captured stream on purpose: -s runs arbitrary commands whose output could
+# otherwise collide with an in-band marker.
+run_one() {
+    local repo="$1" out="$2"
+    shift 2
+    local name rc
+    name="$(basename "$repo")"
+    {
+        printf '%s==> %s%s\n' "$BOLD" "$name" "$Z"
+        if [ "$SHELL_MODE" -eq 1 ]; then
+            (cd "$repo" && sh -c "$*") 2>&1
+            rc=$?
+        else
+            git -C "$repo" "$@" 2>&1
+            rc=$?
+        fi
+        [ "$rc" -ne 0 ] && printf '%s[exit %d]%s\n' "$R" "$rc" "$Z"
+    } >"$out"
+    printf '%d' "$rc" >"$out.rc"
+}
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+nproc=8
+j=0
+for i in "${!repos[@]}"; do
+    printf -v idx '%05d' "$i"
+    run_one "${repos[$i]}" "$tmp/$idx" "$@" &
+    j=$((j + 1))
+    [ $((j % nproc)) -eq 0 ] && wait
+done
+wait
+
+# --- print in order, sum failures ---
+nfail=0
+first=1
+for i in "${!repos[@]}"; do
+    printf -v idx '%05d' "$i"
+    [ -f "$tmp/$idx" ] || continue
+    [ "$first" -eq 1 ] && first=0 || printf '\n'
+    cat "$tmp/$idx"
+    rc="$(cat "$tmp/$idx.rc" 2>/dev/null)"
+    [ -n "$rc" ] && [ "$rc" -ne 0 ] 2>/dev/null && nfail=$((nfail + 1))
+done
+
+printf "${DIM}— %d repos · %d failed${Z}\n" "${#repos[@]}" "$nfail"
+[ "$nfail" -gt 0 ] && exit 1 || exit 0

@@ -1,0 +1,230 @@
+#!/usr/bin/env bash
+# git-ahead — table of how far each repo in a directory is ahead/behind its
+#             remote default branch (origin/main or origin/master), plus the
+#             age of the latest local and latest remote-default commit.
+#
+# Usage:
+#   git-ahead [DIR]        scan immediate subdirectories of DIR (default: cwd)
+#   git ahead [DIR]        same thing (git discovers git-* on PATH)
+#   git-ahead -n [DIR]     no fetch — use cached remote refs (fast/offline)
+#   git-ahead -h           help
+#
+# Compares the CURRENT branch of each repo against origin's default branch.
+set -u
+
+FETCH=1
+case "${1:-}" in
+-h | --help)
+    awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$0"
+    exit 0
+    ;;
+-n | --no-fetch)
+    FETCH=0
+    shift
+    ;;
+esac
+
+root="${1:-.}"
+[ -d "$root" ] || {
+    echo "git-ahead: not a directory: $root" >&2
+    exit 1
+}
+
+# Tokyo Night palette (24-bit truecolor); honors NO_COLOR and non-TTY output.
+# shellcheck disable=SC2034  # shared palette; not every color is used in each tool
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    R=$'\033[38;2;247;118;142m'      # red     #f7768e
+    G=$'\033[38;2;158;206;106m'      # green   #9ece6a
+    Y=$'\033[38;2;224;175;104m'      # yellow  #e0af68
+    DIM=$'\033[38;2;86;95;137m'      # comment #565f89
+    BOLD=$'\033[1;38;2;192;202;245m' # fg bold #c0caf5
+    Z=$'\033[0m'
+else
+    R=
+    G=
+    Y=
+    DIM=
+    BOLD=
+    Z=
+fi
+
+# compact relative time from an epoch to now: 5m 3h 2d 4w 6mo 1y, or "-"
+now="$(date +%s)"
+reltime() {
+    local t="$1" d
+    [ -z "$t" ] && {
+        printf -- '-'
+        return
+    }
+    d=$((now - t))
+    if [ "$d" -lt 60 ]; then
+        printf '%ds' "$d"
+    elif [ "$d" -lt 3600 ]; then
+        printf '%dm' "$((d / 60))"
+    elif [ "$d" -lt 86400 ]; then
+        printf '%dh' "$((d / 3600))"
+    elif [ "$d" -lt 604800 ]; then
+        printf '%dd' "$((d / 86400))"
+    elif [ "$d" -lt 2592000 ]; then
+        printf '%dw' "$((d / 604800))"
+    elif [ "$d" -lt 31536000 ]; then
+        printf '%dmo' "$((d / 2592000))"
+    else printf '%dy' "$((d / 31536000))"; fi
+}
+
+# --- collect git repos (immediate children) ---
+repos=()
+for d in "$root"/*/; do
+    [ -d "$d/.git" ] || git -C "$d" rev-parse --git-dir >/dev/null 2>&1 || continue
+    repos+=("${d%/}")
+done
+[ ${#repos[@]} -eq 0 ] && {
+    echo "git-ahead: no git repositories under '$root'" >&2
+    exit 1
+}
+
+# --- parallel fetch ---
+if [ "$FETCH" -eq 1 ]; then
+    printf '%sfetching %d repos...%s\n' "$DIM" "${#repos[@]}" "$Z" >&2
+    # shellcheck disable=SC2016  # $1 must be expanded by the inner sh, not here (safe arg-passing)
+    printf '%s\0' "${repos[@]}" | xargs -0 -P 16 -I{} sh -c 'git -C "$1" fetch --quiet --no-tags origin 2>/dev/null' _ {}
+fi
+
+# --- per-repo data (parallel) ---
+# Each repo is independent, so analysis runs concurrently; results are written
+# to index-named temp files and read back in directory order for the table.
+declare -a NAME BR AH BE DIRTY LO RE ST
+maxn=4
+maxb=6
+
+analyze() {
+    local repo="$1" out="$2" name branch a b dty status def behind ahead lo re line dirty
+    name="$(basename "$repo")"
+    g() { git -C "$repo" "$@" 2>/dev/null; }
+
+    # One status call yields both the current branch and the dirty flag.
+    # porcelain=v2 emits "# branch.head <name>" (literally "(detached)" when
+    # detached); any non-"#" line means the working tree has changes.
+    branch=""
+    dirty="·"
+    while IFS= read -r line; do
+        case "$line" in
+        "# branch.head "*) branch="${line#\# branch.head }" ;;
+        \#*) ;;
+        ?*) dirty="●" ;;
+        esac
+    done < <(g status --porcelain=v2 --branch)
+    [ -z "$branch" ] && branch="(detached)"
+
+    a="-"
+    b="-"
+    dty="?"
+    status="?"
+    def=""
+
+    if [ -z "$(g config --get remote.origin.url)" ]; then
+        status="no-remote"
+    else
+        def="$(g symbolic-ref --short refs/remotes/origin/HEAD)"
+        if [ -z "$def" ]; then
+            g remote set-head origin --auto >/dev/null 2>&1
+            def="$(g symbolic-ref --short refs/remotes/origin/HEAD)"
+        fi
+        [ -z "$def" ] && for c in origin/main origin/master; do g rev-parse --verify "$c" >/dev/null 2>&1 && def="$c" && break; done
+
+        if [ -z "$def" ]; then
+            status="no-default"
+        elif ! g rev-parse --verify HEAD >/dev/null 2>&1; then
+            status="empty"
+        else
+            read -r behind ahead < <(g rev-list --left-right --count "$def"...HEAD)
+            a="${ahead:-0}"
+            b="${behind:-0}"
+            dty="$dirty"
+            if [ "$a" -gt 0 ] && [ "$b" -gt 0 ]; then
+                status="diverged"
+            elif [ "$a" -gt 0 ]; then
+                status="ahead"
+            elif [ "$b" -gt 0 ]; then
+                status="behind"
+            else status="synced"; fi
+        fi
+    fi
+
+    lo="$(reltime "$(g log -1 --format=%ct 2>/dev/null)")"
+    re="-"
+    [ -n "$def" ] && re="$(reltime "$(g log -1 --format=%ct "$def" 2>/dev/null)")"
+
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$name" "$branch" "$a" "$b" "$dty" "$lo" "$re" "$status" >"$out"
+}
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+nproc=8
+j=0
+for i in "${!repos[@]}"; do
+    printf -v idx '%05d' "$i"
+    analyze "${repos[$i]}" "$tmp/$idx" &
+    j=$((j + 1))
+    [ $((j % nproc)) -eq 0 ] && wait
+done
+wait
+
+for i in "${!repos[@]}"; do
+    printf -v idx '%05d' "$i"
+    [ -f "$tmp/$idx" ] || continue
+    IFS=$'\t' read -r name branch a b dty lo re status <"$tmp/$idx"
+    NAME+=("$name")
+    BR+=("$branch")
+    AH+=("$a")
+    BE+=("$b")
+    DIRTY+=("$dty")
+    LO+=("$lo")
+    RE+=("$re")
+    ST+=("$status")
+    [ ${#name} -gt "$maxn" ] && maxn=${#name}
+    [ ${#branch} -gt "$maxb" ] && maxb=${#branch}
+done
+
+# --- print table ---
+printf "${BOLD}%-${maxn}s  %-${maxb}s  %5s  %6s  %s  %5s  %6s  %s${Z}\n" \
+    "Repo" "Branch" "Ahead" "Behind" "D" "Local" "Remote" "Status"
+
+ndirty=0
+nahead=0
+nbehind=0
+for i in "${!NAME[@]}"; do
+    a="${AH[$i]}"
+    bh="${BE[$i]}"
+    st="${ST[$i]}"
+    dty="${DIRTY[$i]}"
+
+    printf -v ap "%5s" "$a"
+    printf -v bp "%6s" "$bh"
+    if [ "$a" != "-" ] && [ "$a" -gt 0 ] 2>/dev/null; then
+        ap="${ap/$a/${G}${a}${Z}}"
+        nahead=$((nahead + 1))
+    fi
+    if [ "$bh" != "-" ] && [ "$bh" -gt 0 ] 2>/dev/null; then
+        bp="${bp/$bh/${R}${bh}${Z}}"
+        nbehind=$((nbehind + 1))
+    fi
+    if [ "$dty" = "●" ]; then
+        dty="${Y}●${Z}"
+        ndirty=$((ndirty + 1))
+    fi
+
+    case "$st" in
+    ahead) sc="${G}${st}${Z}" ;;
+    behind) sc="${R}${st}${Z}" ;;
+    diverged) sc="${Y}${st}${Z}" ;;
+    *) sc="${DIM}${st}${Z}" ;;
+    esac
+
+    printf "%-${maxn}s  %-${maxb}s  %b  %b  %b  ${DIM}%5s  %6s${Z}  %b\n" \
+        "${NAME[$i]}" "${BR[$i]}" "$ap" "$bp" "$dty" "${LO[$i]}" "${RE[$i]}" "$sc"
+done
+
+printf "${DIM}— %d repos · %d ahead · %d behind · %d dirty${Z}\n" \
+    "${#NAME[@]}" "$nahead" "$nbehind" "$ndirty"

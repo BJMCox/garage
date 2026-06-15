@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+# git-sync-all — fast-forward every clean repo in a directory that is behind
+#                its upstream. Skips dirty and diverged repos (never merges or
+#                rebases). Companion to git-ahead.
+#
+# Usage:
+#   git-sync-all [DIR]     fast-forward repos under DIR (default: cwd)
+#   git sync-all [DIR]     same (git discovers git-* on PATH)
+#   git-sync-all -h        help
+#
+# For each repo it fetches origin, then `merge --ff-only` the current branch
+# from its tracking upstream (@{u}) — only when the working tree is clean and
+# the branch is strictly behind (a true fast-forward).
+set -u
+
+case "${1:-}" in
+-h | --help)
+    awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$0"
+    exit 0
+    ;;
+esac
+
+root="${1:-.}"
+[ -d "$root" ] || {
+    echo "git-sync-all: not a directory: $root" >&2
+    exit 1
+}
+
+# Tokyo Night palette (24-bit truecolor); honors NO_COLOR and non-TTY output.
+# shellcheck disable=SC2034  # shared palette; not every color is used in each tool
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    R=$'\033[38;2;247;118;142m'      # red     #f7768e
+    G=$'\033[38;2;158;206;106m'      # green   #9ece6a
+    Y=$'\033[38;2;224;175;104m'      # yellow  #e0af68
+    DIM=$'\033[38;2;86;95;137m'      # comment #565f89
+    BOLD=$'\033[1;38;2;192;202;245m' # fg bold #c0caf5
+    Z=$'\033[0m'
+else
+    R=
+    G=
+    Y=
+    DIM=
+    BOLD=
+    Z=
+fi
+
+repos=()
+for d in "$root"/*/; do
+    [ -d "$d/.git" ] || git -C "$d" rev-parse --git-dir >/dev/null 2>&1 || continue
+    repos+=("${d%/}")
+done
+[ ${#repos[@]} -eq 0 ] && {
+    echo "git-sync-all: no git repositories under '$root'" >&2
+    exit 1
+}
+
+printf '%sfetching %d repos...%s\n' "$DIM" "${#repos[@]}" "$Z" >&2
+# shellcheck disable=SC2016  # $1 must be expanded by the inner sh, not here (safe arg-passing)
+printf '%s\0' "${repos[@]}" | xargs -0 -P 16 -I{} sh -c 'git -C "$1" fetch --quiet --no-tags origin 2>/dev/null' _ {}
+
+maxn=4
+for r in "${repos[@]}"; do
+    bn=$(basename "$r")
+    [ ${#bn} -gt "$maxn" ] && maxn=${#bn}
+done
+
+# Repos are independent, so fast-forward each concurrently. Each worker writes
+# its status line plus a "@@T <pulled> <skipped>" tally to an index-named temp
+# file; the main loop prints them in directory order and sums the counts.
+analyze() {
+    local repo="$1" out="$2" name branch behind ahead
+    name="$(basename "$repo")"
+    g() { git -C "$repo" "$@" 2>/dev/null; }
+    pf() { printf "%-${maxn}s  %b\n" "$name" "$1"; }
+    {
+        branch="$(g symbolic-ref --short HEAD)"
+        [ -z "$branch" ] && {
+            pf "${DIM}skip (detached HEAD)${Z}"
+            printf '@@T 0 1\n'
+            exit 0
+        }
+        [ -n "$(g status --porcelain)" ] && {
+            pf "${Y}skip (dirty)${Z}"
+            printf '@@T 0 1\n'
+            exit 0
+        }
+        if ! g rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1; then
+            pf "${DIM}skip (no upstream)${Z}"
+            printf '@@T 0 1\n'
+            exit 0
+        fi
+
+        read -r behind ahead < <(g rev-list --left-right --count '@{u}'...HEAD)
+        behind="${behind:-0}"
+        ahead="${ahead:-0}"
+
+        if [ "$behind" -eq 0 ]; then
+            pf "${DIM}up to date${Z}"
+            printf '@@T 0 0\n'
+        elif [ "$ahead" -gt 0 ]; then
+            pf "${R}skip (diverged: +$ahead -$behind)${Z}"
+            printf '@@T 0 1\n'
+        elif g merge --ff-only '@{u}' >/dev/null 2>&1; then
+            pf "${G}pulled $behind${Z}"
+            printf '@@T 1 0\n'
+        else
+            pf "${R}ff failed${Z}"
+            printf '@@F 1\n'
+        fi
+    } >"$out"
+}
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+nproc=8
+j=0
+for i in "${!repos[@]}"; do
+    printf -v idx '%05d' "$i"
+    analyze "${repos[$i]}" "$tmp/$idx" &
+    j=$((j + 1))
+    [ $((j % nproc)) -eq 0 ] && wait
+done
+wait
+
+npulled=0
+nskip=0
+nfail=0
+for i in "${!repos[@]}"; do
+    printf -v idx '%05d' "$i"
+    [ -f "$tmp/$idx" ] || continue
+    while IFS= read -r ln; do
+        # shellcheck disable=SC2086  # $ln is our own "@@T N N" marker — intentional split
+        case "$ln" in
+        '@@T '*)
+            set -- $ln
+            npulled=$((npulled + $2))
+            nskip=$((nskip + $3))
+            ;;
+        '@@F '*)
+            set -- $ln
+            nfail=$((nfail + $2))
+            ;;
+        *) printf '%s\n' "$ln" ;;
+        esac
+    done <"$tmp/$idx"
+done
+
+printf "${DIM}— %d repos · %d fast-forwarded · %d skipped · %d failed${Z}\n" "${#repos[@]}" "$npulled" "$nskip" "$nfail"
+[ "$nfail" -gt 0 ] && exit 1 || exit 0

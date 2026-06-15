@@ -1,0 +1,187 @@
+#!/usr/bin/env bash
+# git-status-all — working-tree summary for every repo in a directory: counts of
+#                  staged / modified / untracked / conflicted paths plus stash
+#                  depth, so you can see what's left uncommitted everywhere.
+#
+# Usage:
+#   git-status-all [DIR]       summarize repos under DIR (default: cwd)
+#   git status-all [DIR]       same (git discovers git-* on PATH)
+#   git-status-all -d [DIR]    only show repos that are dirty / have a stash
+#   git-status-all -h          help
+#
+# Counts come from one `git status --porcelain=v2` per repo; stash depth from
+# `git stash list`. Companion to git-ahead (ahead/behind) and git-tidy (cleanup).
+set -u
+
+DIRTY_ONLY=0
+case "${1:-}" in
+-h | --help)
+    awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$0"
+    exit 0
+    ;;
+-d | --dirty)
+    DIRTY_ONLY=1
+    shift
+    ;;
+esac
+
+root="${1:-.}"
+[ -d "$root" ] || {
+    echo "git-status-all: not a directory: $root" >&2
+    exit 1
+}
+
+# Tokyo Night palette (24-bit truecolor); honors NO_COLOR and non-TTY output.
+# shellcheck disable=SC2034  # shared palette; not every color is used in each tool
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    R=$'\033[38;2;247;118;142m'      # red     #f7768e
+    G=$'\033[38;2;158;206;106m'      # green   #9ece6a
+    Y=$'\033[38;2;224;175;104m'      # yellow  #e0af68
+    B=$'\033[38;2;122;162;247m'      # blue    #7aa2f7
+    M=$'\033[38;2;187;154;247m'      # magenta #bb9af7
+    DIM=$'\033[38;2;86;95;137m'      # comment #565f89
+    BOLD=$'\033[1;38;2;192;202;245m' # fg bold #c0caf5
+    Z=$'\033[0m'
+else
+    R=
+    G=
+    Y=
+    B=
+    M=
+    DIM=
+    BOLD=
+    Z=
+fi
+
+repos=()
+for d in "$root"/*/; do
+    [ -d "$d/.git" ] || git -C "$d" rev-parse --git-dir >/dev/null 2>&1 || continue
+    repos+=("${d%/}")
+done
+[ ${#repos[@]} -eq 0 ] && {
+    echo "git-status-all: no git repositories under '$root'" >&2
+    exit 1
+}
+
+# --- per-repo analysis (parallel); index-named temp files keep table order ---
+analyze() {
+    local repo="$1" out="$2" name branch staged modi untr conf stash status line xy
+    name="$(basename "$repo")"
+    g() { git -C "$repo" "$@" 2>/dev/null; }
+
+    branch=""
+    staged=0
+    modi=0
+    untr=0
+    conf=0
+    while IFS= read -r line; do
+        case "$line" in
+        "# branch.head "*) branch="${line#\# branch.head }" ;;
+        \#*) ;;
+        1\ * | 2\ *) # ordinary / renamed: field 2 is XY (index, worktree)
+            xy="${line#? }"
+            xy="${xy%% *}"
+            [ "${xy%?}" != "." ] && staged=$((staged + 1))
+            [ "${xy#?}" != "." ] && modi=$((modi + 1))
+            ;;
+        u\ *) conf=$((conf + 1)) ;;
+        \?\ *) untr=$((untr + 1)) ;;
+        esac
+    done < <(g status --porcelain=v2 --branch)
+    [ -z "$branch" ] && branch="(detached)"
+
+    stash="$(g stash list | wc -l | tr -d ' ')"
+    stash="${stash:-0}"
+
+    if [ "$conf" -gt 0 ]; then
+        status="conflicts"
+    elif [ $((staged + modi + untr)) -gt 0 ]; then
+        status="dirty"
+    else status="clean"; fi
+
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$name" "$branch" "$staged" "$modi" "$untr" "$conf" "$stash" "$status" >"$out"
+}
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+nproc=8
+j=0
+for i in "${!repos[@]}"; do
+    printf -v idx '%05d' "$i"
+    analyze "${repos[$i]}" "$tmp/$idx" &
+    j=$((j + 1))
+    [ $((j % nproc)) -eq 0 ] && wait
+done
+wait
+
+# --- gather + widths ---
+declare -a NAME BR ST MO UN CO SH STAT
+maxn=4
+maxb=6
+for i in "${!repos[@]}"; do
+    printf -v idx '%05d' "$i"
+    [ -f "$tmp/$idx" ] || continue
+    IFS=$'\t' read -r name branch staged modi untr conf stash status <"$tmp/$idx"
+    if [ "$DIRTY_ONLY" -eq 1 ] && [ "$status" = "clean" ] && [ "$stash" -eq 0 ]; then continue; fi
+    NAME+=("$name")
+    BR+=("$branch")
+    ST+=("$staged")
+    MO+=("$modi")
+    UN+=("$untr")
+    CO+=("$conf")
+    SH+=("$stash")
+    STAT+=("$status")
+    [ ${#name} -gt "$maxn" ] && maxn=${#name}
+    [ ${#branch} -gt "$maxb" ] && maxb=${#branch}
+done
+
+if [ ${#NAME[@]} -eq 0 ]; then
+    printf "${DIM}— all %d repos clean, no stashes${Z}\n" "${#repos[@]}"
+    exit 0
+fi
+
+# right-justify a count to width $2, then colorize: pad the PLAIN value first so
+# columns align (ANSI codes have zero display width), then wrap the number.
+cw() {
+    local v="$1" w="$2" col="$3" s
+    printf -v s "%${w}s" "$v"
+    if [ "$v" -gt 0 ] 2>/dev/null; then
+        printf '%s' "${s/$v/${col}${v}${Z}}"
+    else printf '%s' "${DIM}${s}${Z}"; fi
+}
+
+# --- print ---
+printf "${BOLD}%-${maxn}s  %-${maxb}s  %6s  %6s  %6s  %6s  %5s  %s${Z}\n" \
+    "Repo" "Branch" "Staged" "Modif" "Untrk" "Confl" "Stash" "Status"
+
+ndirty=0
+nconf=0
+nstash=0
+for i in "${!NAME[@]}"; do
+    st="${STAT[$i]}"
+    case "$st" in
+    conflicts)
+        sc="${R}${st}${Z}"
+        nconf=$((nconf + 1))
+        ;;
+    dirty)
+        sc="${Y}${st}${Z}"
+        ndirty=$((ndirty + 1))
+        ;;
+    *) sc="${DIM}${st}${Z}" ;;
+    esac
+    [ "${SH[$i]}" -gt 0 ] && nstash=$((nstash + 1))
+
+    printf "%-${maxn}s  %-${maxb}s  %s  %s  %s  %s  %s  %b\n" \
+        "${NAME[$i]}" "${BR[$i]}" \
+        "$(cw "${ST[$i]}" 6 "$G")" \
+        "$(cw "${MO[$i]}" 6 "$Y")" \
+        "$(cw "${UN[$i]}" 6 "$B")" \
+        "$(cw "${CO[$i]}" 6 "$R")" \
+        "$(cw "${SH[$i]}" 5 "$M")" \
+        "$sc"
+done
+
+printf "${DIM}— %d shown · %d dirty · %d with conflicts · %d with stashes${Z}\n" \
+    "${#NAME[@]}" "$ndirty" "$nconf" "$nstash"

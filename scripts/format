@@ -1,0 +1,443 @@
+#!/usr/bin/env bash
+# format — one formatter front-end for many languages. Dispatches each file to
+#          the right tool by extension; `--as` forces a language for all inputs.
+#
+# Usage:
+#   format [PATH...]            format files / recurse dirs (default: cwd)
+#   format --check [PATH...]    report what would change; write nothing
+#   format --as LANG [PATH...]  force LANG's formatter (ignore extensions)
+#   format --list               show the extension → formatter table
+#   format -h                   help
+#
+# Flags:
+#   -c, --check     don't write; exit non-zero if anything would change
+#   -a, --as LANG   override: py jl json toml rs md yaml js ts css html …
+#   -l, --list      print the formatter map and exit
+#   -h, --help      this help
+#
+# Per-file result: ✓ formatted · unchanged ✗ error – no formatter. Explicitly
+# named files always report; files found by recursing a dir are silent unless a
+# formatter applies (no noise for unknown types). Honors NO_COLOR / non-TTY.
+#
+# Requires (only the ones you use): ruff (.py), prettier (.json/.md/.yaml/web),
+# taplo (.toml), rustfmt (.rs), julia + JuliaFormatter (.jl).
+set -u
+
+CHECK=0
+OVERRIDE=""
+root_default="."
+PATHS=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+    -h | --help)
+        awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$0"
+        exit 0
+        ;;
+    -c | --check)
+        CHECK=1
+        shift
+        ;;
+    -a | --as)
+        [ -n "${2:-}" ] || {
+            echo "format: --as requires a LANG argument" >&2
+            exit 1
+        }
+        OVERRIDE="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"
+        shift 2
+        ;;
+    -l | --list)
+        LIST=1
+        shift
+        ;;
+    --)
+        shift
+        while [ $# -gt 0 ]; do
+            PATHS+=("$1")
+            shift
+        done
+        ;;
+    -*)
+        echo "format: unknown flag: $1" >&2
+        exit 1
+        ;;
+    *)
+        PATHS+=("$1")
+        shift
+        ;;
+    esac
+done
+
+# Tokyo Night palette (24-bit truecolor); honors NO_COLOR and non-TTY output.
+# shellcheck disable=SC2034  # shared palette; not every color is used in each tool
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    R=$'\033[38;2;247;118;142m'      # red     #f7768e
+    G=$'\033[38;2;158;206;106m'      # green   #9ece6a
+    Y=$'\033[38;2;224;175;104m'      # yellow  #e0af68
+    DIM=$'\033[38;2;86;95;137m'      # comment #565f89
+    BOLD=$'\033[1;38;2;192;202;245m' # fg bold #c0caf5
+    Z=$'\033[0m'
+else
+    R=
+    G=
+    Y=
+    DIM=
+    BOLD=
+    Z=
+fi
+
+# ext (lowercased, alias-normalized) → formatter tool name (the binary checked
+# on PATH). Empty = unsupported. The actual command lives in run_writer().
+formatter_for() {
+    case "$1" in
+    py | ipynb) echo ruff ;;
+    jl) echo julia ;;
+    toml) echo taplo ;;
+    rs) echo rustfmt ;;
+    tex) echo tex-fmt ;;
+    bib) echo bibtex-tidy ;;
+    sh | bash) echo shfmt ;;
+    cmake) echo gersemi ;;
+    c | cc | cpp | cxx | h | hpp | hh | hxx | cu | cuh) echo clang-format ;;
+    f | for | f90 | f95 | f03 | f08) echo fprettify ;;
+    r) echo air ;;
+    sql) echo sqlfluff ;;
+    typ) echo typstyle ;;
+    nix) echo nixfmt ;;
+    proto) echo buf ;;
+    v | sv | svh) echo verible-verilog-format ;;
+    go) echo gofumpt ;;
+    lua) echo stylua ;;
+    zig) echo zig ;;
+    swift) echo swift-format ;;
+    java) echo google-java-format ;;
+    kt | kts) echo ktlint ;;
+    hs) echo ormolu ;;
+    rb) echo rufo ;;
+    pl | pm) echo perltidy ;;
+    xml) echo xmllint ;;
+    tf | tfvars) echo tofu ;;
+    json | jsonc | json5) echo prettier ;;
+    md | markdown | mdx | yaml | yml | html | htm | css | scss | less | js | jsx | cjs | mjs | ts | tsx | vue | graphql | gql) echo prettier ;;
+    *) echo "" ;;
+    esac
+}
+
+# In-place format command for (canonical ext, file). This is the single source
+# of truth for HOW each tool formats; check mode and --as reuse it via a temp
+# copy (see do_fmt). rc 99 = no writer for this ext. For tools that run several
+# steps (ruff), the meaningful rc is the final formatter's.
+run_writer() {
+    local ext="$1" file="$2" tf_tmp rc
+    case "$ext" in
+    py | ipynb)
+        ruff check --fix -q "$file"
+        ruff format -q "$file"
+        ;;
+    jl) julia --startup-file=no -e 'using JuliaFormatter; format_file(ARGS[1])' "$file" ;;
+    toml) taplo fmt "$file" ;;
+    rs) rustfmt "$file" ;;
+    tex) tex-fmt "$file" ;;
+    bib) bibtex-tidy --no-backup --quiet "$file" ;;
+    sh | bash) shfmt -i 4 -w "$file" ;;
+    cmake) gersemi -i "$file" ;;
+    c | cc | cpp | cxx | h | hpp | hh | hxx | cu | cuh) clang-format -i "$file" ;;
+    f | for | f90 | f95 | f03 | f08) fprettify "$file" ;;
+    r) air format "$file" ;;
+    sql) sqlfluff format --dialect ansi "$file" ;;
+    typ) typstyle -i "$file" ;;
+    nix) nixfmt "$file" ;;
+    proto) buf format -w "$file" ;;
+    v | sv | svh) verible-verilog-format --inplace "$file" ;;
+    go) gofumpt -w "$file" ;;
+    lua) stylua "$file" ;;
+    zig) zig fmt "$file" ;;
+    swift) swift-format -i "$file" ;;
+    java) google-java-format -i "$file" ;;
+    kt | kts) ktlint -F "$file" ;;
+    hs) ormolu --mode inplace "$file" ;;
+    rb) rufo "$file" ;;
+    pl | pm) perltidy -b -bext='/' "$file" ;;
+    xml)
+        tf_tmp="$(mktemp)"
+        xmllint --format "$file" >"$tf_tmp" 2>/dev/null
+        rc=$?
+        [ "$rc" -eq 0 ] && cat "$tf_tmp" >"$file"
+        rm -f "$tf_tmp"
+        return "$rc"
+        ;;
+    tf | tfvars) tofu fmt "$file" ;;
+    json | jsonc | json5 | md | markdown | mdx | yaml | yml | ts | tsx | js | jsx | cjs | mjs | css | scss | less | html | htm | vue | graphql | gql)
+        prettier --write --parser "$(prettier_parser "$ext")" "$file"
+        ;;
+    *) return 99 ;;
+    esac
+}
+
+# Extension aliases — non-standard extensions that should be treated as another.
+# Normalized once (in the work loop) before any dispatch, so a new alias is a
+# single line here and the rest of the pipeline needs no changes.
+canon_ext() {
+    case "$1" in
+    hs3) echo json ;; # .hs3 = JSON
+    *) echo "$1" ;;
+    esac
+}
+
+# For an extensionless file, infer a pseudo-extension from its shebang line so
+# scripts (e.g. `git-ahead`, with `#!/usr/bin/env bash`) format without --as.
+# Prints a canonical ext, or nothing if there's no recognized shebang.
+shebang_lang() {
+    local first
+    IFS= read -r first <"$1" 2>/dev/null || return 0
+    case "$first" in
+    '#!'*) ;;
+    *) return 0 ;;
+    esac
+    case "$first" in
+    *bash* | */sh | *" sh") echo sh ;;
+    *python*) echo py ;;
+    *perl*) echo pl ;;
+    *ruby*) echo rb ;;
+    *node*) echo js ;;
+    esac
+}
+
+# prettier infers its parser from the filename, so files with non-standard
+# extensions need it stated explicitly. Maps (canonical) ext → parser.
+prettier_parser() {
+    case "$1" in
+    json | jsonc | json5) echo json ;;
+    md | markdown | mdx) echo markdown ;;
+    yaml | yml) echo yaml ;;
+    ts | tsx) echo typescript ;;
+    js | jsx | cjs | mjs) echo babel ;;
+    css | scss | less) echo css ;;
+    html | htm) echo html ;;
+    vue) echo vue ;;
+    graphql | gql) echo graphql ;;
+    *) echo "" ;;
+    esac
+}
+
+# Content hash for write-mode change detection. Falls back across hashers so
+# minimal Linux without Perl (no shasum) still detects changes correctly.
+_hash() {
+    if command -v shasum >/dev/null 2>&1; then
+        shasum "$1"
+    elif command -v sha1sum >/dev/null 2>&1; then
+        sha1sum "$1"
+    else sha256sum "$1"; fi 2>/dev/null | cut -d' ' -f1
+}
+
+if [ "${LIST:-0}" = 1 ]; then
+    printf "${BOLD}%-46s  %s${Z}\n" "Extensions" "Formatter"
+    # tool present on PATH? mark it.
+    have() { command -v "$1" >/dev/null 2>&1 && printf '' || printf '  %s(not installed)%s' "$DIM" "$Z"; }
+    row() { printf "%-34s  %s%s\n" "$1" "$2" "$(have "${3:-$2}")"; }
+    row ".py .ipynb" ruff
+    row ".jl" julia # JuliaFormatter pkg
+    row ".json .jsonc .json5 .hs3 + web/md/yaml" prettier
+    row ".toml" taplo
+    row ".rs" rustfmt
+    row ".tex" tex-fmt
+    row ".bib" bibtex-tidy
+    row ".sh .bash" shfmt
+    row "CMakeLists.txt .cmake" gersemi
+    row ".c .cpp .h .cu .cuh …" clang-format
+    row ".f90 .f95 .f03 .f" fprettify
+    row ".R .r" air
+    row ".sql" sqlfluff
+    row ".typ" typstyle
+    row ".nix" nixfmt
+    row ".proto" buf
+    row ".v .sv .svh" verible-verilog-format
+    row ".go" gofumpt
+    row ".lua" stylua
+    row ".zig" zig
+    row ".swift" swift-format
+    row ".java" google-java-format
+    row ".kt .kts" ktlint
+    row ".hs" ormolu
+    row ".rb" rufo
+    row ".pl .pm" perltidy
+    row ".xml" xmllint
+    row ".tf .tfvars" tofu
+    exit 0
+fi
+
+[ ${#PATHS[@]} -eq 0 ] && PATHS=("$root_default")
+
+# One-time JuliaFormatter probe (julia startup is slow; only pay it if needed).
+JL_OK=""
+jl_ready() {
+    [ -n "$JL_OK" ] && {
+        [ "$JL_OK" = 1 ]
+        return
+    }
+    if command -v julia >/dev/null 2>&1 && julia --startup-file=no -e 'using JuliaFormatter' >/dev/null 2>&1; then
+        JL_OK=1
+    else JL_OK=0; fi
+    [ "$JL_OK" = 1 ]
+}
+
+# Build the work list. Explicit files always report; dir-recursed files only
+# report when a formatter applies.
+FILES=()
+SRC=()
+nmissing=0
+for p in "${PATHS[@]}"; do
+    if [ -d "$p" ]; then
+        while IFS= read -r -d '' f; do
+            FILES+=("$f")
+            SRC+=("found")
+        done \
+            < <(find -L "$p" -maxdepth 5 -type f -not -path '*/.git/*' -print0 2>/dev/null | sort -z)
+    elif [ -e "$p" ]; then
+        FILES+=("$p")
+        SRC+=("explicit")
+    else
+        echo "format: no such path: $p" >&2
+        nmissing=$((nmissing + 1))
+    fi
+done
+
+# RESULT is set by do_fmt: formatted | unchanged | wouldfmt | ok | error | skip | notool:<x>
+# Every tool exposes just ONE in-place command (run_writer). Write mode runs it
+# on the file and diffs by hash. Check mode (and --as, where the file's name may
+# not match the forced ext) run it on a temp copy named with the target ext, then
+# byte-compare — so no tool needs its own --check flag and overrides Just Work.
+RESULT=""
+do_fmt() {
+    local ext="$1" file="$2" tool before after rc tmpd tf
+    tool="$(formatter_for "$ext")"
+    [ -z "$tool" ] && {
+        RESULT="skip"
+        return
+    }
+
+    if [ "$tool" = julia ]; then
+        jl_ready || {
+            RESULT="notool:JuliaFormatter"
+            return
+        }
+    elif ! command -v "$tool" >/dev/null 2>&1; then
+        RESULT="notool:$tool"
+        return
+    fi
+
+    # rc semantics: a CHANGE always counts as success even if the tool exited
+    # non-zero — lint-formatters (rubocop, ktlint, sqlfluff) reformat AND exit 1
+    # when unfixable issues remain. Only "no change + non-zero exit" is a real
+    # error (genuine parse/tool failure). rc 99 = no writer for this ext.
+    if [ "$CHECK" -eq 1 ] || [ -n "$OVERRIDE" ]; then
+        tmpd="$(mktemp -d)"
+        tf="$tmpd/f.$ext"
+        cat "$file" >"$tf"
+        run_writer "$ext" "$tf" >/dev/null 2>&1
+        rc=$?
+        if [ "$rc" -eq 99 ]; then
+            RESULT="skip"
+            rm -rf "$tmpd"
+            return
+        fi
+        if cmp -s "$file" "$tf"; then
+            if [ "$rc" -ne 0 ]; then
+                RESULT="error"
+            elif [ "$CHECK" -eq 1 ]; then
+                RESULT="ok"
+            else RESULT="unchanged"; fi
+        elif [ "$CHECK" -eq 1 ]; then
+            RESULT="wouldfmt"
+        else
+            cat "$tf" >"$file"
+            RESULT="formatted"
+        fi
+        rm -rf "$tmpd"
+        return
+    fi
+
+    before="$(_hash "$file")"
+    run_writer "$ext" "$file" >/dev/null 2>&1
+    rc=$?
+    if [ "$rc" -eq 99 ]; then
+        RESULT="skip"
+        return
+    fi
+    after="$(_hash "$file")"
+    if [ "$before" != "$after" ]; then
+        RESULT="formatted"
+    elif [ "$rc" -ne 0 ]; then
+        RESULT="error"
+    else RESULT="unchanged"; fi
+}
+
+nfmt=0
+nunch=0
+nwould=0
+nerr=0
+nskip=0
+nnotool=0
+for i in "${!FILES[@]}"; do
+    f="${FILES[$i]}"
+    src="${SRC[$i]}"
+    if [ -n "$OVERRIDE" ]; then ext="$OVERRIDE"; else
+        base="${f##*/}"
+        ext="${base##*.}"
+        [ "$ext" = "$base" ] && ext=""
+        ext="$(printf '%s' "$ext" | tr '[:upper:]' '[:lower:]')"
+        # extensionless files recognized by name
+        case "$base" in CMakeLists.txt | CMakeLists.txt.in) ext=cmake ;; esac
+        # still extensionless? fall back to the shebang (e.g. a bash script)
+        [ -z "$ext" ] && ext="$(shebang_lang "$f")"
+    fi
+    ext="$(canon_ext "$ext")" # normalize aliases (e.g. hs3 → json) before dispatch
+
+    do_fmt "$ext" "$f"
+
+    case "$RESULT" in
+    skip)
+        [ "$src" = explicit ] && {
+            printf "%s– %s%s %s(no formatter for .%s)%s\n" "$DIM" "$f" "$Z" "$DIM" "${ext:-?}" "$Z"
+            nskip=$((nskip + 1))
+        }
+        ;;
+    notool:*)
+        tool="${RESULT#notool:}"
+        [ "$src" = explicit ] && {
+            printf "%s– %s%s %s(needs %s)%s\n" "$DIM" "$f" "$Z" "$Y" "$tool" "$Z"
+            nnotool=$((nnotool + 1))
+        }
+        ;;
+    formatted)
+        printf "%s✓%s %s\n" "$G" "$Z" "$f"
+        nfmt=$((nfmt + 1))
+        ;;
+    unchanged)
+        printf "%s·%s %s%s%s\n" "$DIM" "$Z" "$DIM" "$f" "$Z"
+        nunch=$((nunch + 1))
+        ;;
+    wouldfmt)
+        printf "%s✓%s %s %s(would format)%s\n" "$Y" "$Z" "$f" "$DIM" "$Z"
+        nwould=$((nwould + 1))
+        ;;
+    ok)
+        printf "%s·%s %s%s%s\n" "$DIM" "$Z" "$DIM" "$f" "$Z"
+        nunch=$((nunch + 1))
+        ;;
+    error)
+        printf "%s✗%s %s\n" "$R" "$Z" "$f"
+        nerr=$((nerr + 1))
+        ;;
+    esac
+done
+
+if [ "$CHECK" -eq 1 ]; then
+    printf "${DIM}— %d ok · %d would change · %d errors · %d skipped${Z}\n" "$nunch" "$nwould" "$nerr" "$((nskip + nnotool))"
+else
+    printf "${DIM}— %d formatted · %d unchanged · %d errors · %d skipped${Z}\n" "$nfmt" "$nunch" "$nerr" "$((nskip + nnotool))"
+fi
+
+[ "$nerr" -gt 0 ] && exit 1
+[ "$nmissing" -gt 0 ] && exit 1
+[ "$CHECK" -eq 1 ] && [ "$nwould" -gt 0 ] && exit 1
+exit 0

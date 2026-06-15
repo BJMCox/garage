@@ -1,0 +1,215 @@
+#!/usr/bin/env bash
+# lint — one linter front-end for many languages. Dispatches each file to the
+#        right linter by extension and reports problems. Read-only (never
+#        writes); the sibling of `format` (which fixes style). Exits non-zero if
+#        any file has lint issues.
+#
+# Usage:
+#   lint [PATH...]            lint files / recurse dirs (default: cwd)
+#   lint --as LANG [PATH...]  force a language (ignore extensions)
+#   lint --list               show the extension → linter table + install status
+#   lint -h                   help
+#
+# Per-file result: ✓ clean (dim) · ✗ issues (red, diagnostics shown) · – no
+# linter / missing tool. Explicitly named files always report; dir-recursed
+# files stay silent unless a linter applies. Extensionless files are dispatched
+# by their shebang. Honors NO_COLOR and non-TTY output.
+#
+# Requires (only what you use): ruff (.py), shellcheck (.sh), taplo (.toml),
+# yamllint (.yaml), jq (.json), luacheck (.lua), hadolint (Dockerfile),
+# markdownlint (.md).
+set -u
+
+OVERRIDE=""
+PATHS=()
+LIST=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+    -h | --help)
+        awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$0"
+        exit 0
+        ;;
+    -a | --as)
+        [ -n "${2:-}" ] || {
+            echo "lint: --as requires a LANG argument" >&2
+            exit 1
+        }
+        OVERRIDE="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"
+        shift 2
+        ;;
+    -l | --list)
+        LIST=1
+        shift
+        ;;
+    --)
+        shift
+        while [ $# -gt 0 ]; do
+            PATHS+=("$1")
+            shift
+        done
+        ;;
+    -*)
+        echo "lint: unknown flag: $1" >&2
+        exit 1
+        ;;
+    *)
+        PATHS+=("$1")
+        shift
+        ;;
+    esac
+done
+
+# Tokyo Night palette (24-bit truecolor); honors NO_COLOR and non-TTY output.
+# shellcheck disable=SC2034  # shared palette; not every color is used in each tool
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    R=$'\033[38;2;247;118;142m'      # red     #f7768e
+    G=$'\033[38;2;158;206;106m'      # green   #9ece6a
+    DIM=$'\033[38;2;86;95;137m'      # comment #565f89
+    BOLD=$'\033[1;38;2;192;202;245m' # fg bold #c0caf5
+    Z=$'\033[0m'
+else
+    R=
+    G=
+    DIM=
+    BOLD=
+    Z=
+fi
+
+# ext (canonical) → linter binary. Empty = unsupported.
+linter_for() {
+    case "$1" in
+    py) echo ruff ;;
+    sh | bash) echo shellcheck ;;
+    toml) echo taplo ;;
+    yaml | yml) echo yamllint ;;
+    json | jsonc | json5) echo jq ;;
+    lua) echo luacheck ;;
+    dockerfile) echo hadolint ;;
+    md | markdown) echo markdownlint ;;
+    *) echo "" ;;
+    esac
+}
+
+# Run the linter for (ext, file): print diagnostics, return 0 clean / non-0 issues.
+run_linter() {
+    local ext="$1" file="$2"
+    case "$ext" in
+    py) ruff check "$file" ;;
+    sh | bash) shellcheck "$file" ;;
+    toml) taplo lint "$file" ;;
+    yaml | yml) yamllint "$file" ;;
+    json | jsonc | json5) jq empty "$file" ;;
+    lua) luacheck "$file" ;;
+    dockerfile) hadolint "$file" ;;
+    md | markdown) markdownlint "$file" ;;
+    *) return 99 ;;
+    esac
+}
+
+# Extension aliases (shared idea with format): normalize before dispatch.
+canon_ext() {
+    case "$1" in
+    hs3) echo json ;;
+    *) echo "$1" ;;
+    esac
+}
+
+# Infer a pseudo-extension from a shebang for extensionless files.
+shebang_lang() {
+    local first
+    IFS= read -r first <"$1" 2>/dev/null || return 0
+    case "$first" in
+    '#!'*) ;;
+    *) return 0 ;;
+    esac
+    case "$first" in
+    *bash* | */sh | *" sh") echo sh ;;
+    *python*) echo py ;;
+    esac
+}
+
+if [ "$LIST" = 1 ]; then
+    have() { command -v "$1" >/dev/null 2>&1 && printf '' || printf '  %s(not installed)%s' "$DIM" "$Z"; }
+    row() { printf "%-22s  %s%s\n" "$1" "$2" "$(have "$2")"; }
+    printf "${BOLD}%-22s  %s${Z}\n" "Extensions" "Linter"
+    row ".py" ruff
+    row ".sh .bash" shellcheck
+    row ".toml" taplo
+    row ".yaml .yml" yamllint
+    row ".json .jsonc .json5 .hs3" jq
+    row ".lua" luacheck
+    row "Dockerfile" hadolint
+    row ".md .markdown" markdownlint
+    exit 0
+fi
+
+[ ${#PATHS[@]} -eq 0 ] && PATHS=(".")
+
+# Build the work list. Explicit files always report; dir-recursed files only
+# report when a linter applies.
+FILES=()
+SRC=()
+nmissing=0
+for p in "${PATHS[@]}"; do
+    if [ -d "$p" ]; then
+        while IFS= read -r -d '' f; do
+            FILES+=("$f")
+            SRC+=("found")
+        done < <(find -L "$p" -maxdepth 5 -type f -not -path '*/.git/*' -print0 2>/dev/null | sort -z)
+    elif [ -e "$p" ]; then
+        FILES+=("$p")
+        SRC+=("explicit")
+    else
+        echo "lint: no such path: $p" >&2
+        nmissing=$((nmissing + 1))
+    fi
+done
+
+nclean=0
+nissue=0
+nskip=0
+for i in "${!FILES[@]}"; do
+    f="${FILES[$i]}"
+    src="${SRC[$i]}"
+    if [ -n "$OVERRIDE" ]; then
+        ext="$OVERRIDE"
+    else
+        base="${f##*/}"
+        ext="${base##*.}"
+        [ "$ext" = "$base" ] && ext=""
+        ext="$(printf '%s' "$ext" | tr '[:upper:]' '[:lower:]')"
+        case "$base" in Dockerfile | Dockerfile.*) ext=dockerfile ;; esac
+        [ -z "$ext" ] && ext="$(shebang_lang "$f")"
+    fi
+    ext="$(canon_ext "$ext")"
+
+    tool="$(linter_for "$ext")"
+    if [ -z "$tool" ]; then
+        [ "$src" = explicit ] && {
+            printf "%s– %s%s %s(no linter for .%s)%s\n" "$DIM" "$f" "$Z" "$DIM" "${ext:-?}" "$Z"
+            nskip=$((nskip + 1))
+        }
+        continue
+    fi
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        printf "%s– %s%s %s(needs %s)%s\n" "$DIM" "$f" "$Z" "$R" "$tool" "$Z"
+        nskip=$((nskip + 1))
+        continue
+    fi
+
+    out="$(run_linter "$ext" "$f" 2>&1)"
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+        printf "%s·%s %s%s%s\n" "$DIM" "$Z" "$DIM" "$f" "$Z"
+        nclean=$((nclean + 1))
+    else
+        printf "%s✗ %s%s\n" "$R" "$f" "$Z"
+        [ -n "$out" ] && printf '%s\n' "$out" | sed 's/^/    /'
+        nissue=$((nissue + 1))
+    fi
+done
+
+printf "${DIM}— %d clean · %d with issues · %d skipped${Z}\n" "$nclean" "$nissue" "$((nskip + nmissing))"
+[ "$nissue" -gt 0 ] && exit 1
+[ "$nmissing" -gt 0 ] && exit 1
+exit 0

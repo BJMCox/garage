@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+# git-clone-all — clone every repo owned by a GitHub org/user into a directory,
+#                 in parallel. Repos already present are skipped, so it's safe to
+#                 re-run to pick up newly-created repos. The bootstrap step for
+#                 the other git-* tools (then: git ahead / sync-all / status-all).
+#
+# Usage:
+#   git-clone-all OWNER [DIR]     clone OWNER's repos into DIR (default: cwd)
+#   git-clone-all --ssh OWNER     clone via SSH URLs instead of HTTPS
+#   git-clone-all --limit N OWNER cap the number of repos (default: 1000)
+#   git clone-all OWNER [DIR]     same (git discovers git-* on PATH)
+#   git-clone-all -h              help
+#
+# Requires the GitHub CLI (`gh`), authenticated (`gh auth login`). Each repo is
+# cloned to DIR/<name>; an existing DIR/<name> is left untouched (reported as
+# "skip (exists)"). Honors NO_COLOR and non-TTY output.
+set -u
+
+SSH=0
+LIMIT=1000
+owner=""
+dir="."
+while [ $# -gt 0 ]; do
+    case "$1" in
+    -h | --help)
+        awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$0"
+        exit 0
+        ;;
+    --ssh)
+        SSH=1
+        shift
+        ;;
+    --limit)
+        [ -n "${2:-}" ] || {
+            echo "git-clone-all: --limit requires a number" >&2
+            exit 1
+        }
+        LIMIT="$2"
+        shift 2
+        ;;
+    -*)
+        echo "git-clone-all: unknown flag: $1" >&2
+        exit 1
+        ;;
+    *)
+        if [ -z "$owner" ]; then owner="$1"; else dir="$1"; fi
+        shift
+        ;;
+    esac
+done
+
+[ -n "$owner" ] || {
+    echo "git-clone-all: OWNER (GitHub org or user) required (try -h)" >&2
+    exit 1
+}
+command -v gh >/dev/null 2>&1 || {
+    echo "git-clone-all: needs the GitHub CLI (gh) — https://cli.github.com" >&2
+    exit 1
+}
+mkdir -p "$dir" || exit 1
+
+# Tokyo Night palette (24-bit truecolor); honors NO_COLOR and non-TTY output.
+# shellcheck disable=SC2034  # shared palette; not every color is used in each tool
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    R=$'\033[38;2;247;118;142m'      # red     #f7768e
+    G=$'\033[38;2;158;206;106m'      # green   #9ece6a
+    DIM=$'\033[38;2;86;95;137m'      # comment #565f89
+    BOLD=$'\033[1;38;2;192;202;245m' # fg bold #c0caf5
+    Z=$'\033[0m'
+else
+    R=
+    G=
+    DIM=
+    BOLD=
+    Z=
+fi
+
+# Enumerate the owner's repos: name<TAB>https<TAB>ssh, one per line.
+list="$(gh repo list "$owner" --limit "$LIMIT" --json name,url,sshUrl \
+    -q '.[] | "\(.name)\t\(.url)\t\(.sshUrl)"' 2>/dev/null)"
+[ -n "$list" ] || {
+    echo "git-clone-all: no repos found for '$owner' (or not authenticated: gh auth status)" >&2
+    exit 1
+}
+
+names=()
+urls=()
+while IFS="$(printf '\t')" read -r name https ssh; do
+    [ -n "$name" ] || continue
+    names+=("$name")
+    if [ "$SSH" = 1 ]; then urls+=("$ssh"); else urls+=("$https"); fi
+done <<EOF
+$list
+EOF
+
+printf '%scloning %d repos from %s into %s...%s\n' "$DIM" "${#names[@]}" "$owner" "$dir" "$Z" >&2
+
+# Clone each repo in parallel; workers write a result line + an "@@C <state>"
+# tally marker to an index-named temp file, read back in order.
+clone_one() {
+    local name="$1" url="$2" out="$3"
+    {
+        if [ -e "$dir/$name" ]; then
+            printf "%s· skip%s %s %s(exists)%s\n" "$DIM" "$Z" "$name" "$DIM" "$Z"
+            printf '@@C skip\n'
+        elif git clone -q "$url" "$dir/$name" >/dev/null 2>&1; then
+            printf "%s✓ cloned%s %s\n" "$G" "$Z" "$name"
+            printf '@@C cloned\n'
+        else
+            printf "%s✗ failed%s %s\n" "$R" "$Z" "$name"
+            printf '@@C fail\n'
+        fi
+    } >"$out"
+}
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+nproc=8
+j=0
+for i in "${!names[@]}"; do
+    printf -v idx '%05d' "$i"
+    clone_one "${names[$i]}" "${urls[$i]}" "$tmp/$idx" &
+    j=$((j + 1))
+    [ $((j % nproc)) -eq 0 ] && wait
+done
+wait
+
+ncloned=0
+nskip=0
+nfail=0
+for i in "${!names[@]}"; do
+    printf -v idx '%05d' "$i"
+    [ -f "$tmp/$idx" ] || continue
+    while IFS= read -r ln; do
+        case "$ln" in
+        '@@C cloned') ncloned=$((ncloned + 1)) ;;
+        '@@C skip') nskip=$((nskip + 1)) ;;
+        '@@C fail') nfail=$((nfail + 1)) ;;
+        *) printf '%s\n' "$ln" ;;
+        esac
+    done <"$tmp/$idx"
+done
+
+printf "${DIM}— %d cloned · %d skipped (exists) · %d failed${Z}\n" "$ncloned" "$nskip" "$nfail"
+[ "$nfail" -gt 0 ] && exit 1 || exit 0

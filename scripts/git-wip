@@ -1,0 +1,216 @@
+#!/usr/bin/env bash
+# git-wip — snapshot uncommitted work in every repo under a directory onto a
+#           `wip/<timestamp>` branch, without disturbing your working tree. An
+#           escape hatch to run before risky operations (e.g. git tidy -f).
+#
+# Usage:
+#   git-wip [DIR]          snapshot dirty repos under DIR (default: cwd)
+#   git wip [DIR]          same (git discovers git-* on PATH)
+#   git-wip -m MSG [DIR]   use a custom snapshot commit message
+#   git-wip --list [DIR]   list existing wip/<ts> branches across repos
+#   git-wip --prune [DIR]  delete every wip/<ts> branch across repos
+#   git-wip -h             help
+#
+# For each repo with uncommitted changes (tracked or untracked), git-wip records
+# a commit capturing the full working tree (via a temporary index, so the real
+# index, working tree, and current branch are left untouched) and points a new
+# branch `wip/<timestamp>` at it. Clean repos are skipped. Recover with
+# `git checkout wip/<ts>` (inspect), `git checkout wip/<ts> -- .` (restore
+# files), or discard with `git branch -D wip/<ts>`. Honors NO_COLOR / non-TTY.
+set -u
+
+MSG=""
+MODE=snapshot
+case "${1:-}" in
+-h | --help)
+    awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$0"
+    exit 0
+    ;;
+-l | --list)
+    MODE=list
+    shift
+    ;;
+-p | --prune)
+    MODE=prune
+    shift
+    ;;
+-m | --message)
+    [ -n "${2:-}" ] || {
+        echo "git-wip: -m requires a message argument" >&2
+        exit 1
+    }
+    MSG="$2"
+    shift 2
+    ;;
+esac
+
+root="${1:-.}"
+[ -d "$root" ] || {
+    echo "git-wip: not a directory: $root" >&2
+    exit 1
+}
+
+# Tokyo Night palette (24-bit truecolor); honors NO_COLOR and non-TTY output.
+# shellcheck disable=SC2034  # shared palette; not every color is used in each tool
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    R=$'\033[38;2;247;118;142m'      # red     #f7768e
+    G=$'\033[38;2;158;206;106m'      # green   #9ece6a
+    Y=$'\033[38;2;224;175;104m'      # yellow  #e0af68
+    DIM=$'\033[38;2;86;95;137m'      # comment #565f89
+    BOLD=$'\033[1;38;2;192;202;245m' # fg bold #c0caf5
+    Z=$'\033[0m'
+else
+    R=
+    G=
+    Y=
+    DIM=
+    BOLD=
+    Z=
+fi
+
+ts="$(date +%Y%m%d-%H%M%S)"
+branch="wip/$ts"
+[ -n "$MSG" ] || MSG="wip snapshot $ts"
+
+repos=()
+for d in "$root"/*/; do
+    [ -d "$d/.git" ] || git -C "$d" rev-parse --git-dir >/dev/null 2>&1 || continue
+    repos+=("${d%/}")
+done
+[ ${#repos[@]} -eq 0 ] && {
+    echo "git-wip: no git repositories under '$root'" >&2
+    exit 1
+}
+
+# --- list mode: show existing wip/* branches across repos -----------------
+if [ "$MODE" = list ]; then
+    total=0
+    nrepos=0
+    for repo in "${repos[@]}"; do
+        brs="$(git -C "$repo" for-each-ref --sort=-committerdate \
+            --format='%(refname:short)  %(committerdate:relative)' 'refs/heads/wip/*' 2>/dev/null)"
+        [ -n "$brs" ] || continue
+        nrepos=$((nrepos + 1))
+        printf '%s%s%s\n' "$BOLD" "$(basename "$repo")" "$Z"
+        while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            printf '  %s%s%s\n' "$DIM" "$line" "$Z"
+            total=$((total + 1))
+        done <<EOF
+$brs
+EOF
+    done
+    printf "${DIM}— %d wip branch(es) across %d repo(s)${Z}\n" "$total" "$nrepos"
+    exit 0
+fi
+
+# --- prune mode: delete every wip/* branch across repos -------------------
+if [ "$MODE" = prune ]; then
+    total=0
+    nrepos=0
+    for repo in "${repos[@]}"; do
+        brs="$(git -C "$repo" for-each-ref --format='%(refname:short)' 'refs/heads/wip/*' 2>/dev/null)"
+        [ -n "$brs" ] || continue
+        printed=0
+        while IFS= read -r b; do
+            [ -n "$b" ] || continue
+            git -C "$repo" branch -D "$b" >/dev/null 2>&1 || continue
+            [ "$printed" -eq 0 ] && {
+                printf '%s%s%s\n' "$BOLD" "$(basename "$repo")" "$Z"
+                printed=1
+                nrepos=$((nrepos + 1))
+            }
+            printf '  %sdeleted%s %s\n' "$R" "$Z" "$b"
+            total=$((total + 1))
+        done <<EOF
+$brs
+EOF
+    done
+    printf "${DIM}— pruned %d wip branch(es) across %d repo(s)${Z}\n" "$total" "$nrepos"
+    exit 0
+fi
+
+# Snapshot one repo. Builds the tree in a throwaway index so nothing real is
+# touched; writes a "@@W <state>" tally marker plus a human line to "$out".
+snapshot() {
+    local repo="$1" out="$2" name n tree wc idxdir
+    name="$(basename "$repo")"
+    g() { git -C "$repo" "$@" 2>/dev/null; }
+    {
+        if [ -z "$(g status --porcelain)" ]; then
+            printf '%s·%s %s%s%s\n' "$DIM" "$Z" "$DIM" "$name" "$Z"
+            printf '@@W clean\n'
+            exit 0
+        fi
+        n="$(g status --porcelain | grep -c .)"
+        idxdir="$(mktemp -d)" || {
+            printf '%s✗%s %s %s(mktemp failed)%s\n' "$R" "$Z" "$name" "$DIM" "$Z"
+            printf '@@W fail\n'
+            exit 0
+        }
+        if ! GIT_INDEX_FILE="$idxdir/index" git -C "$repo" add -A 2>/dev/null; then
+            rm -rf "$idxdir"
+            printf '%s✗%s %s %s(snapshot failed)%s\n' "$R" "$Z" "$name" "$DIM" "$Z"
+            printf '@@W fail\n'
+            exit 0
+        fi
+        tree="$(GIT_INDEX_FILE="$idxdir/index" git -C "$repo" write-tree 2>/dev/null)"
+        rm -rf "$idxdir"
+        if [ -z "$tree" ]; then
+            printf '%s✗%s %s %s(snapshot failed)%s\n' "$R" "$Z" "$name" "$DIM" "$Z"
+            printf '@@W fail\n'
+            exit 0
+        fi
+        if g rev-parse --verify -q HEAD >/dev/null; then
+            wc="$(g commit-tree "$tree" -p HEAD -m "$MSG")"
+        else
+            wc="$(g commit-tree "$tree" -m "$MSG")"
+        fi
+        if [ -z "$wc" ]; then
+            printf '%s✗%s %s %s(commit failed — set git user.name/email?)%s\n' "$R" "$Z" "$name" "$DIM" "$Z"
+            printf '@@W fail\n'
+            exit 0
+        fi
+        g branch -f "$branch" "$wc"
+        printf '%s✓%s %s  %s→ %s (%s changes)%s\n' "$G" "$Z" "$name" "$DIM" "$branch" "$n" "$Z"
+        printf '@@W wip\n'
+    } >"$out"
+}
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+nproc=8
+j=0
+for i in "${!repos[@]}"; do
+    printf -v idx '%05d' "$i"
+    snapshot "${repos[$i]}" "$tmp/$idx" &
+    j=$((j + 1))
+    [ $((j % nproc)) -eq 0 ] && wait
+done
+wait
+
+nwip=0
+nclean=0
+nfail=0
+for i in "${!repos[@]}"; do
+    printf -v idx '%05d' "$i"
+    [ -f "$tmp/$idx" ] || continue
+    while IFS= read -r ln; do
+        # shellcheck disable=SC2086  # $ln is our own "@@W <state>" marker — intentional split
+        case "$ln" in
+        '@@W '*)
+            set -- $ln
+            case "$2" in
+            wip) nwip=$((nwip + 1)) ;;
+            clean) nclean=$((nclean + 1)) ;;
+            fail) nfail=$((nfail + 1)) ;;
+            esac
+            ;;
+        *) printf '%s\n' "$ln" ;;
+        esac
+    done <"$tmp/$idx"
+done
+
+printf "${DIM}— %d snapshotted · %d clean · %d failed${Z}\n" "$nwip" "$nclean" "$nfail"
+[ "$nwip" -gt 0 ] && printf "${DIM}  recover with: git checkout %s${Z}\n" "$branch"
+[ "$nfail" -gt 0 ] && exit 1 || exit 0
