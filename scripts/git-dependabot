@@ -181,9 +181,42 @@ EOF
     printf '@@T %d %d %d %d %d\n' "$merged" "$would" "$conflict" "$pending" "$failed"
 }
 
-for r in "${repos[@]}"; do
-    classify "$r"
-done | grep -v '^@@T '
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+nproc=8
+j=0
+for i in "${!repos[@]}"; do
+    printf -v idx '%05d' "$i"
+    classify "${repos[$i]}" >"$tmp/$idx" &
+    j=$((j + 1))
+    [ $((j % nproc)) -eq 0 ] && wait
+done
+wait
 
-printf "${DIM}— %d repos${Z}\n" "${#repos[@]}"
-exit 0
+nmerged=0
+nwould=0
+nconf=0
+npend=0
+nfail=0
+for i in "${!repos[@]}"; do
+    printf -v idx '%05d' "$i"
+    [ -f "$tmp/$idx" ] || continue
+    while IFS= read -r ln; do
+        case "$ln" in
+        '@@T '*)
+            # shellcheck disable=SC2086  # our own marker — intentional split
+            set -- $ln
+            nmerged=$((nmerged + $2))
+            nwould=$((nwould + $3))
+            nconf=$((nconf + $4))
+            npend=$((npend + $5))
+            nfail=$((nfail + $6))
+            ;;
+        *) printf '%s\n' "$ln" ;;
+        esac
+    done <"$tmp/$idx"
+done
+
+printf "${DIM}— %d repos · %d merged · %d would-merge · %d conflict · %d pending · %d failed${Z}\n" \
+    "${#repos[@]}" "$nmerged" "$nwould" "$nconf" "$npend" "$nfail"
+[ "$nfail" -gt 0 ] && exit 1 || exit 0

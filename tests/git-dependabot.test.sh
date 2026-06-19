@@ -131,5 +131,89 @@ contains "alpha update-branch ran" "$log" "update-branch alpha 7"
 contains "alpha squash merge ran"  "$log" "merge alpha 7 --squash --delete-branch"
 case "$log" in *"merge beta"*) bad "beta must NOT merge (conflict)";; *) ok "beta not merged";; esac
 
+# --- test: footer tally + ordering + exit status --------------------------
+out="$("$SCRIPT" "$tmp2/repos")"   # reuse Task-2 fixture: alpha/beta/gamma
+contains "footer repos count" "$out" "3 repos"
+contains "footer would-merge" "$out" "1 would-merge"
+contains "footer conflict"    "$out" "1 conflict"
+# ordering: alpha before beta before gamma (directory order)
+a=$(printf '%s\n' "$out" | grep -n 'alpha' | head -1 | cut -d: -f1)
+b=$(printf '%s\n' "$out" | grep -n 'beta'  | head -1 | cut -d: -f1)
+g=$(printf '%s\n' "$out" | grep -n 'gamma' | head -1 | cut -d: -f1)
+if [ -n "$a" ] && [ -n "$b" ] && [ -n "$g" ] && [ "$a" -lt "$b" ] && [ "$b" -lt "$g" ]; then
+    ok "ordered output"
+else
+    bad "ordered output (a=$a b=$b g=$g)"
+fi
+
+# exit status: a forced merge failure -> nonzero
+# Build a fresh fake gh that makes `gh pr merge` exit 1 — no sed needed.
+tmp4="$(mktemp -d)"; bindir4="$tmp4/bin"; mkdir -p "$bindir4"
+cat >"$bindir4/gh" <<'GHEOF'
+#!/usr/bin/env bash
+set -u
+repo="$(basename "$PWD")"
+sub="$1"; shift
+case "$sub" in
+pr)
+  action="$1"; shift
+  case "$action" in
+  list)
+    f="$GH_FIXTURE/$repo.prs"
+    use_template=0
+    for arg in "$@"; do
+      case "$arg" in --template) use_template=1 ;; esac
+    done
+    if [ "$use_template" -eq 1 ]; then
+      if [ -f "$f" ]; then
+        awk 'BEGIN{RS="},";FS=","} {
+          num=""; mg=""; ti=""
+          for(i=1;i<=NF;i++){
+            if($i ~ /"number":/){gsub(/.*"number":/,"",$i); gsub(/[^0-9]/,"",$i); num=$i}
+            if($i ~ /"mergeable":/){gsub(/.*"mergeable":"/,"",$i); gsub(/".*$/,"",$i); mg=$i}
+            if($i ~ /"title":/){gsub(/.*"title":"/,"",$i); gsub(/".*$/,"",$i); ti=$i}
+          }
+          if(num!="") printf "%s\t%s\t%s\n", num, mg, ti
+        }' "$f"
+      fi
+    else
+      if [ -f "$f" ]; then cat "$f"; else echo '[]'; fi
+    fi
+    ;;
+  view)
+    num="$1"; shift
+    mf="$GH_FIXTURE/$repo.$num.mergeable"
+    mv="MERGEABLE"; [ -f "$mf" ] && mv="$(cat "$mf")"
+    use_template=0
+    for arg in "$@"; do
+      case "$arg" in --template) use_template=1 ;; esac
+    done
+    if [ "$use_template" -eq 1 ]; then
+      printf '%s' "$mv"
+    else
+      printf '{"mergeable":"%s","mergeStateStatus":"CLEAN"}\n' "$mv"
+    fi
+    ;;
+  update-branch) echo "update-branch $repo $*" >>"$GH_FIXTURE/log" ;;
+  merge)
+    echo "merge $repo $*" >>"$GH_FIXTURE/log"
+    exit 1
+    ;;
+  *) echo "fake gh: unknown pr action $action" >&2; exit 2 ;;
+  esac
+  ;;
+*) echo "fake gh: unknown $sub" >&2; exit 2 ;;
+esac
+GHEOF
+chmod +x "$bindir4/gh"
+
+GH_FIXTURE="$tmp4/fx"; export GH_FIXTURE; mkdir -p "$GH_FIXTURE"
+PATH="$bindir4:$PATH"; export PATH
+GD_POLL_TRIES=1 GD_POLL_SLEEP=0; export GD_POLL_TRIES GD_POLL_SLEEP
+mkrepo "$tmp4/repos/delta"
+printf '[{"number":3,"title":"bump pkg","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}]\n' >"$GH_FIXTURE/delta.prs"
+"$SCRIPT" --merge "$tmp4/repos" >/dev/null 2>&1; rc=$?
+check "merge failure exits nonzero" "$rc" "1"
+
 echo "---"
 [ "$fails" -eq 0 ] && { echo "all passed"; exit 0; } || { echo "$fails failed"; exit 1; }
