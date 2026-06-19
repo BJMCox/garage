@@ -32,10 +32,12 @@ while [ $# -gt 0 ]; do
         exit 2
         ;;
     *)
-        [ -z "$root" ] && root="$1" || {
+        if [ -z "$root" ]; then
+            root="$1"
+        else
             echo "git-dependabot: too many arguments" >&2
             exit 2
-        }
+        fi
         ;;
     esac
     shift
@@ -56,7 +58,7 @@ if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
     BOLD=$'\033[1;38;2;192;202;245m'
     Z=$'\033[0m'
 else
-    R= G= Y= DIM= BOLD= Z=
+    R='' G='' Y='' DIM='' BOLD='' Z=''
 fi
 
 repos=()
