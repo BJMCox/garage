@@ -84,7 +84,7 @@ pr_mergeable() {
 # Echoes a status line via the caller's `pf`. Returns 0 merged, 1 failed,
 # 2 skipped (still pending / re-conflicted). Caller maps the code to a tally.
 merge_pr() {
-    local num="$1" title="$2" tries sleep_s state i
+    local num="$1" title="$2" tries sleep_s state="" i
     tries="${GD_POLL_TRIES:-5}"
     sleep_s="${GD_POLL_SLEEP:-2}"
 
