@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# git-dependabot — scan a directory of repos for open Dependabot PRs and, with
+#                  --merge, bring each conflict-free PR up to date with its base
+#                  and squash-merge it. Reports only by default. GitHub-side via
+#                  the gh CLI; no local clones are touched. Companion to
+#                  git-sync-all / git-status-all.
+#
+# Usage:
+#   git-dependabot [DIR]           report open dependabot PRs under DIR (default cwd)
+#   git-dependabot --merge [DIR]   update-branch + squash-merge every conflict-free PR
+#   git dependabot [DIR]           same (git discovers git-* on PATH)
+#   git-dependabot -h | --help     help
+#
+# A PR is eligible only when GitHub reports it MERGEABLE (no conflicts with the
+# base). CI status is not gated. Eligible PRs are squash-merged with branch
+# deletion, after gh pr update-branch (which merges current base into the PR
+# branch, preserving intervening work). Requires gh, authenticated.
+# Honors NO_COLOR and non-TTY output.
+set -u
+
+MERGE=0
+root=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+    -h | --help)
+        awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$0"
+        exit 0
+        ;;
+    --merge) MERGE=1 ;;
+    -*)
+        echo "git-dependabot: unknown option: $1" >&2
+        exit 2
+        ;;
+    *)
+        [ -z "$root" ] && root="$1" || {
+            echo "git-dependabot: too many arguments" >&2
+            exit 2
+        }
+        ;;
+    esac
+    shift
+done
+root="${root:-.}"
+[ -d "$root" ] || {
+    echo "git-dependabot: not a directory: $root" >&2
+    exit 1
+}
+
+# Tokyo Night palette (24-bit truecolor); honors NO_COLOR and non-TTY output.
+# shellcheck disable=SC2034  # shared palette; not every color is used
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    R=$'\033[38;2;247;118;142m'
+    G=$'\033[38;2;158;206;106m'
+    Y=$'\033[38;2;224;175;104m'
+    DIM=$'\033[38;2;86;95;137m'
+    BOLD=$'\033[1;38;2;192;202;245m'
+    Z=$'\033[0m'
+else
+    R= G= Y= DIM= BOLD= Z=
+fi
+
+repos=()
+for d in "$root"/*/; do
+    [ -d "$d/.git" ] || git -C "$d" rev-parse --git-dir >/dev/null 2>&1 || continue
+    repos+=("${d%/}")
+done
+[ ${#repos[@]} -eq 0 ] && {
+    echo "git-dependabot: no git repositories under '$root'" >&2
+    exit 1
+}
+
+maxn=4
+for r in "${repos[@]}"; do
+    bn=$(basename "$r")
+    [ ${#bn} -gt "$maxn" ] && maxn=${#bn}
+done
+
+# Placeholder body — replaced in Task 2/3.
+for r in "${repos[@]}"; do
+    printf "%-${maxn}s  %s(todo)%s\n" "$(basename "$r")" "$DIM" "$Z"
+done
+printf "${DIM}— %d repos${Z}\n" "${#repos[@]}"
+exit 0
