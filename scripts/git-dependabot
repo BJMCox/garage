@@ -75,6 +75,51 @@ for r in "${repos[@]}"; do
     [ ${#bn} -gt "$maxn" ] && maxn=${#bn}
 done
 
+# Read mergeable state for one PR via gh's template (no JSON parser).
+pr_mergeable() {
+    gh pr view "$1" --json mergeable --template '{{.mergeable}}' 2>/dev/null
+}
+
+# update-branch -> poll until MERGEABLE again -> squash merge.
+# Echoes a status line via the caller's `pf`. Returns 0 merged, 1 failed,
+# 2 skipped (still pending / re-conflicted). Caller maps the code to a tally.
+merge_pr() {
+    local num="$1" title="$2" tries sleep_s state i
+    tries="${GD_POLL_TRIES:-5}"
+    sleep_s="${GD_POLL_SLEEP:-2}"
+
+    if ! gh pr update-branch "$num" >/dev/null 2>&1; then
+        # "already up to date" is reported as failure by some gh versions but is
+        # harmless; fall through and let the merge attempt be the real gate.
+        :
+    fi
+
+    i=0
+    while [ "$i" -lt "$tries" ]; do
+        state="$(pr_mergeable "$num")"
+        case "$state" in
+        MERGEABLE) break ;;
+        CONFLICTING)
+            pf "${R}conflict #$num${Z} ${DIM}$title${Z}"
+            return 2
+            ;;
+        esac
+        i=$((i + 1))
+        [ "$i" -lt "$tries" ] && [ "$sleep_s" != "0" ] && sleep "$sleep_s"
+    done
+    if [ "$state" != "MERGEABLE" ]; then
+        pf "${Y}pending #$num${Z} ${DIM}$title${Z}"
+        return 2
+    fi
+
+    if gh pr merge "$num" --squash --delete-branch >/dev/null 2>&1; then
+        pf "${G}merged #$num${Z} ${DIM}$title${Z}"
+        return 0
+    fi
+    pf "${R}failed #$num${Z} ${DIM}$title${Z}"
+    return 1
+}
+
 # List dependabot PRs for a repo as TSV lines: "<number>\t<mergeable>\t<title>".
 # Uses gh's Go-template output so we need no JSON parser.
 list_prs() {
@@ -96,7 +141,8 @@ classify() {
         return
     fi
 
-    prs="$(cd "$repo" && list_prs)"
+    cd "$repo" || return
+    prs="$(list_prs)"
     if [ -z "$prs" ]; then
         pf "${DIM}no dependabot PRs${Z}"
         printf '@@T 0 0 0 0 0\n'
@@ -109,8 +155,12 @@ classify() {
         case "$state" in
         MERGEABLE)
             if [ "$MERGE" -eq 1 ]; then
-                # filled in Task 3
-                :
+                merge_pr "$n" "$title"
+                case $? in
+                0) merged=$((merged + 1)) ;;
+                1) failed=$((failed + 1)) ;;
+                2) pending=$((pending + 1)) ;;
+                esac
             else
                 pf "${G}would merge #$n${Z} ${DIM}$title${Z}"
                 would=$((would + 1))

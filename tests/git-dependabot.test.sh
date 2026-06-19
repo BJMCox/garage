@@ -50,11 +50,20 @@ pr)
     fi
     ;;
   view)
-    num="$1"
+    num="$1"; shift
     # mergeable comes from $GH_FIXTURE/$repo.$num.mergeable (default MERGEABLE)
     mf="$GH_FIXTURE/$repo.$num.mergeable"
     mv="MERGEABLE"; [ -f "$mf" ] && mv="$(cat "$mf")"
-    printf '{"mergeable":"%s","mergeStateStatus":"CLEAN"}\n' "$mv"
+    # detect --template flag: if present, emit just the value
+    use_template=0
+    for arg in "$@"; do
+      case "$arg" in --template) use_template=1 ;; esac
+    done
+    if [ "$use_template" -eq 1 ]; then
+      printf '%s' "$mv"
+    else
+      printf '{"mergeable":"%s","mergeStateStatus":"CLEAN"}\n' "$mv"
+    fi
     ;;
   update-branch) echo "update-branch $repo $*" >>"$GH_FIXTURE/log" ;;
   merge)         echo "merge $repo $*"         >>"$GH_FIXTURE/log" ;;
@@ -102,6 +111,25 @@ contains "alpha would-merge"  "$out" "would merge #7 bump lodash"
 contains "beta conflict"      "$out" "conflict #9 bump axios"
 contains "gamma none"         "$out" "no dependabot PRs"
 contains "dry-run no merge log" "$([ -f "$GH_FIXTURE/log" ] && cat "$GH_FIXTURE/log" || echo NONE)" "NONE"
+
+# --- test: --merge acts on MERGEABLE PRs ----------------------------------
+tmp3="$(mktemp -d)"; bindir3="$tmp3/bin"; mkdir -p "$bindir3"
+make_fake_gh "$bindir3"
+GH_FIXTURE="$tmp3/fx"; export GH_FIXTURE; mkdir -p "$GH_FIXTURE"
+PATH="$bindir3:$PATH"; export PATH
+GD_POLL_TRIES=2 GD_POLL_SLEEP=0; export GD_POLL_TRIES GD_POLL_SLEEP
+
+mkrepo "$tmp3/repos/alpha"
+mkrepo "$tmp3/repos/beta"
+printf '[{"number":7,"title":"bump lodash","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}]\n' >"$GH_FIXTURE/alpha.prs"
+printf '[{"number":9,"title":"bump axios","mergeable":"CONFLICTING","mergeStateStatus":"DIRTY"}]\n'  >"$GH_FIXTURE/beta.prs"
+
+out="$("$SCRIPT" --merge "$tmp3/repos")"
+contains "alpha merged line"   "$out" "merged #7"
+log="$(cat "$GH_FIXTURE/log")"
+contains "alpha update-branch ran" "$log" "update-branch alpha 7"
+contains "alpha squash merge ran"  "$log" "merge alpha 7 --squash --delete-branch"
+case "$log" in *"merge beta"*) bad "beta must NOT merge (conflict)";; *) ok "beta not merged";; esac
 
 echo "---"
 [ "$fails" -eq 0 ] && { echo "all passed"; exit 0; } || { echo "$fails failed"; exit 1; }
