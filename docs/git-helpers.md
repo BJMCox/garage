@@ -255,6 +255,54 @@ across the repos (with relative age), and `git wip --prune` deletes them all.
 
 ---
 
+## git-dependabot — merge Dependabot PRs across repos
+
+Scan a directory of repos for open Dependabot PRs and, with `--merge`, bring
+each conflict-free PR up to date with its base branch and squash-merge it.
+**Dry-run by default** — reports what would happen without touching anything.
+
+| Command                          | Action                                                         |
+| -------------------------------- | -------------------------------------------------------------- |
+| `git dependabot [DIR]`           | Report open Dependabot PRs under DIR (default: cwd)            |
+| `git-dependabot --merge [DIR]`   | Update-branch + squash-merge every mergeable PR under DIR      |
+| `git-dependabot -h`              | Help                                                           |
+
+```
+$ git dependabot ~/src
+webapp  would merge #42  Bump actions/checkout from 3 to 4
+webapp  conflict  #41   Bump node from 18 to 20
+api     no dependabot PRs
+worker  would merge #7   Bump ruff from 0.3.0 to 0.4.1
+— 3 repos · 0 merged · 2 would-merge · 1 conflict · 0 pending · 0 failed
+
+$ git dependabot --merge ~/src
+webapp  merged #42   Bump actions/checkout from 3 to 4
+webapp  conflict #41  Bump node from 18 to 20
+api     no dependabot PRs
+worker  merged #7    Bump ruff from 0.3.0 to 0.4.1
+— 3 repos · 2 merged · 0 would-merge · 1 conflict · 0 pending · 0 failed
+```
+
+A PR is acted on only when GitHub reports it `MERGEABLE` (no conflicts with the
+base branch). CI status is **not** gated — eligible PRs are merged immediately
+once they are conflict-free. The merge sequence is:
+
+1. `gh pr update-branch` — merges the current base into the PR branch so
+   intervening work on the base is incorporated, never reverted.
+2. Poll GitHub (up to `GD_POLL_TRIES` times, default 5, sleeping `GD_POLL_SLEEP`
+   seconds between attempts) until the mergeability state settles.
+3. `gh pr merge --squash --delete-branch` — squash-merge the PR and delete its
+   branch.
+
+A PR that becomes `CONFLICTING` after the update-branch, or that remains
+`UNKNOWN`/`PENDING` after all poll attempts, is counted as **pending** (exit 0).
+A merge command that returns non-zero is counted as **failed** (exit 1).
+
+Requires the GitHub CLI (`gh`), authenticated (`gh auth login`). Repos without a
+GitHub remote are silently skipped.
+
+---
+
 ## Performance
 
 All of these are **parallel**: repos are independent, so per-repo analysis runs

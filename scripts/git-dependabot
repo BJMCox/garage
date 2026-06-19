@@ -1,0 +1,224 @@
+#!/usr/bin/env bash
+# git-dependabot — scan a directory of repos for open Dependabot PRs and, with
+#                  --merge, bring each conflict-free PR up to date with its base
+#                  and squash-merge it. Reports only by default. GitHub-side via
+#                  the gh CLI; no local clones are touched. Companion to
+#                  git-sync-all / git-status-all.
+#
+# Usage:
+#   git-dependabot [DIR]           report open dependabot PRs under DIR (default cwd)
+#   git-dependabot --merge [DIR]   update-branch + squash-merge every conflict-free PR
+#   git dependabot [DIR]           same (git discovers git-* on PATH)
+#   git-dependabot -h | --help     help
+#
+# A PR is eligible only when GitHub reports it MERGEABLE (no conflicts with the
+# base). CI status is not gated. Eligible PRs are squash-merged with branch
+# deletion, after gh pr update-branch (which merges current base into the PR
+# branch, preserving intervening work). Requires gh, authenticated.
+# Honors NO_COLOR and non-TTY output.
+set -u
+
+MERGE=0
+root=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+    -h | --help)
+        awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$0"
+        exit 0
+        ;;
+    --merge) MERGE=1 ;;
+    -*)
+        echo "git-dependabot: unknown option: $1" >&2
+        exit 2
+        ;;
+    *)
+        if [ -z "$root" ]; then
+            root="$1"
+        else
+            echo "git-dependabot: too many arguments" >&2
+            exit 2
+        fi
+        ;;
+    esac
+    shift
+done
+root="${root:-.}"
+[ -d "$root" ] || {
+    echo "git-dependabot: not a directory: $root" >&2
+    exit 1
+}
+
+# Tokyo Night palette (24-bit truecolor); honors NO_COLOR and non-TTY output.
+# shellcheck disable=SC2034  # shared palette; not every color is used
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    R=$'\033[38;2;247;118;142m'
+    G=$'\033[38;2;158;206;106m'
+    Y=$'\033[38;2;224;175;104m'
+    DIM=$'\033[38;2;86;95;137m'
+    BOLD=$'\033[1;38;2;192;202;245m'
+    Z=$'\033[0m'
+else
+    R='' G='' Y='' DIM='' BOLD='' Z=''
+fi
+
+repos=()
+for d in "$root"/*/; do
+    [ -d "$d/.git" ] || git -C "$d" rev-parse --git-dir >/dev/null 2>&1 || continue
+    repos+=("${d%/}")
+done
+[ ${#repos[@]} -eq 0 ] && {
+    echo "git-dependabot: no git repositories under '$root'" >&2
+    exit 1
+}
+
+maxn=4
+for r in "${repos[@]}"; do
+    bn=$(basename "$r")
+    [ ${#bn} -gt "$maxn" ] && maxn=${#bn}
+done
+
+# Read mergeable state for one PR via gh's template (no JSON parser).
+pr_mergeable() {
+    gh pr view "$1" --json mergeable --template '{{.mergeable}}' 2>/dev/null
+}
+
+# update-branch -> poll until MERGEABLE again -> squash merge.
+# Echoes a status line via the caller's `pf`. Returns 0 merged, 1 failed,
+# 2 skipped (still pending / re-conflicted). Caller maps the code to a tally.
+merge_pr() {
+    local num="$1" title="$2" tries sleep_s state="" i
+    tries="${GD_POLL_TRIES:-5}"
+    sleep_s="${GD_POLL_SLEEP:-2}"
+
+    if ! gh pr update-branch "$num" >/dev/null 2>&1; then
+        # "already up to date" is reported as failure by some gh versions but is
+        # harmless; fall through and let the merge attempt be the real gate.
+        :
+    fi
+
+    i=0
+    while [ "$i" -lt "$tries" ]; do
+        state="$(pr_mergeable "$num")"
+        case "$state" in
+        MERGEABLE) break ;;
+        CONFLICTING)
+            pf "${R}conflict #$num${Z} ${DIM}$title${Z}"
+            return 2
+            ;;
+        esac
+        i=$((i + 1))
+        [ "$i" -lt "$tries" ] && [ "$sleep_s" != "0" ] && sleep "$sleep_s"
+    done
+    if [ "$state" != "MERGEABLE" ]; then
+        pf "${Y}pending #$num${Z} ${DIM}$title${Z}"
+        return 2
+    fi
+
+    if gh pr merge "$num" --squash --delete-branch >/dev/null 2>&1; then
+        pf "${G}merged #$num${Z} ${DIM}$title${Z}"
+        return 0
+    fi
+    pf "${R}failed #$num${Z} ${DIM}$title${Z}"
+    return 1
+}
+
+# List dependabot PRs for a repo as TSV lines: "<number>\t<mergeable>\t<title>".
+# Uses gh's Go-template output so we need no JSON parser.
+list_prs() {
+    gh pr list --author 'app/dependabot[bot]' --state open \
+        --json number,title,mergeable \
+        --template '{{range .}}{{.number}}{{"\t"}}{{.mergeable}}{{"\t"}}{{.title}}{{"\n"}}{{end}}' \
+        2>/dev/null
+}
+
+# classify one repo, writing status lines + tally marker to stdout.
+classify() {
+    local repo="$1" name prs n state title
+    name="$(basename "$repo")"
+    pf() { printf "%-${maxn}s  %b\n" "$name" "$1"; }
+
+    if ! git -C "$repo" remote get-url origin >/dev/null 2>&1; then
+        pf "${DIM}skip (no github)${Z}"
+        printf '@@T 0 0 0 0 0\n'
+        return
+    fi
+
+    cd "$repo" || return
+    prs="$(list_prs)"
+    if [ -z "$prs" ]; then
+        pf "${DIM}no dependabot PRs${Z}"
+        printf '@@T 0 0 0 0 0\n'
+        return
+    fi
+
+    local merged=0 would=0 conflict=0 pending=0 failed=0
+    while IFS="$(printf '\t')" read -r n state title; do
+        [ -z "$n" ] && continue
+        case "$state" in
+        MERGEABLE)
+            if [ "$MERGE" -eq 1 ]; then
+                merge_pr "$n" "$title"
+                case $? in
+                0) merged=$((merged + 1)) ;;
+                1) failed=$((failed + 1)) ;;
+                2) pending=$((pending + 1)) ;;
+                esac
+            else
+                pf "${G}would merge #$n${Z} ${DIM}$title${Z}"
+                would=$((would + 1))
+            fi
+            ;;
+        CONFLICTING)
+            pf "${R}conflict #$n${Z} ${DIM}$title${Z}"
+            conflict=$((conflict + 1))
+            ;;
+        *)
+            pf "${Y}pending #$n${Z} ${DIM}$title${Z}"
+            pending=$((pending + 1))
+            ;;
+        esac
+    done <<EOF
+$prs
+EOF
+    printf '@@T %d %d %d %d %d\n' "$merged" "$would" "$conflict" "$pending" "$failed"
+}
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+nproc=8
+j=0
+for i in "${!repos[@]}"; do
+    printf -v idx '%05d' "$i"
+    classify "${repos[$i]}" >"$tmp/$idx" &
+    j=$((j + 1))
+    [ $((j % nproc)) -eq 0 ] && wait
+done
+wait
+
+nmerged=0
+nwould=0
+nconf=0
+npend=0
+nfail=0
+for i in "${!repos[@]}"; do
+    printf -v idx '%05d' "$i"
+    [ -f "$tmp/$idx" ] || continue
+    while IFS= read -r ln; do
+        case "$ln" in
+        '@@T '*)
+            # shellcheck disable=SC2086  # our own marker — intentional split
+            set -- $ln
+            nmerged=$((nmerged + $2))
+            nwould=$((nwould + $3))
+            nconf=$((nconf + $4))
+            npend=$((npend + $5))
+            nfail=$((nfail + $6))
+            ;;
+        *) printf '%s\n' "$ln" ;;
+        esac
+    done <"$tmp/$idx"
+done
+
+printf "${DIM}— %d repos · %d merged · %d would-merge · %d conflict · %d pending · %d failed${Z}\n" \
+    "${#repos[@]}" "$nmerged" "$nwould" "$nconf" "$npend" "$nfail"
+[ "$nfail" -gt 0 ] && exit 1 || exit 0

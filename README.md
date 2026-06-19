@@ -81,6 +81,7 @@ cwd), in parallel. Works as either `git-foo` or, since they're on `PATH` named
 | `git-each`       | Run a git subcommand (or, with `-s`, a shell command) in every repo.                                                                    |
 | `git-clone-all`  | Clone every repo of a GitHub org/user into a directory (via `gh`), in parallel. Skips already-cloned repos — the bootstrap step.         |
 | `git-wip`        | Snapshot uncommitted work (tracked + untracked) across repos onto `wip/<ts>` branches, without touching your working tree. An escape hatch before risky ops. |
+| `git-dependabot` | Scan repos for open Dependabot PRs. Dry-run by default; `--merge` to update-branch and squash-merge every conflict-free PR. Requires `gh`, authenticated. |
 
 ### format
 
