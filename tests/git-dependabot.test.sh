@@ -27,7 +27,27 @@ pr)
   case "$action" in
   list)
     f="$GH_FIXTURE/$repo.prs"
-    if [ -f "$f" ]; then cat "$f"; else echo '[]'; fi
+    # detect --template flag: if present, emit TSV number\tmergeable\ttitle per PR
+    use_template=0
+    for arg in "$@"; do
+      case "$arg" in --template) use_template=1 ;; esac
+    done
+    if [ "$use_template" -eq 1 ]; then
+      if [ -f "$f" ]; then
+        # parse simple one-object-per-array JSON with awk (no jq needed in test stub)
+        awk 'BEGIN{RS="},";FS=","} {
+          num=""; mg=""; ti=""
+          for(i=1;i<=NF;i++){
+            if($i ~ /"number":/){gsub(/.*"number":/,"",$i); gsub(/[^0-9]/,"",$i); num=$i}
+            if($i ~ /"mergeable":/){gsub(/.*"mergeable":"/,"",$i); gsub(/".*$/,"",$i); mg=$i}
+            if($i ~ /"title":/){gsub(/.*"title":"/,"",$i); gsub(/".*$/,"",$i); ti=$i}
+          }
+          if(num!="") printf "%s\t%s\t%s\n", num, mg, ti
+        }' "$f"
+      fi
+    else
+      if [ -f "$f" ]; then cat "$f"; else echo '[]'; fi
+    fi
     ;;
   view)
     num="$1"
@@ -63,6 +83,25 @@ tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 out="$("$SCRIPT" "$tmp" 2>&1)"; rc=$?
 check "no repos exits 1" "$rc" "1"
 contains "no repos message" "$out" "no git repositories"
+
+# --- test: classification (dry-run) ---------------------------------------
+tmp2="$(mktemp -d)"; bindir="$tmp2/bin"; mkdir -p "$bindir"
+make_fake_gh "$bindir"
+export GH_FIXTURE="$tmp2/fx"; mkdir -p "$GH_FIXTURE"
+PATH="$bindir:$PATH"; export PATH
+
+mkrepo "$tmp2/repos/alpha"   # MERGEABLE PR
+mkrepo "$tmp2/repos/beta"    # CONFLICTING PR
+mkrepo "$tmp2/repos/gamma"   # no dependabot PRs
+printf '[{"number":7,"title":"bump lodash","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}]\n' >"$GH_FIXTURE/alpha.prs"
+printf '[{"number":9,"title":"bump axios","mergeable":"CONFLICTING","mergeStateStatus":"DIRTY"}]\n'  >"$GH_FIXTURE/beta.prs"
+printf '[]\n' >"$GH_FIXTURE/gamma.prs"
+
+out="$("$SCRIPT" "$tmp2/repos")"
+contains "alpha would-merge"  "$out" "would merge #7 bump lodash"
+contains "beta conflict"      "$out" "conflict #9 bump axios"
+contains "gamma none"         "$out" "no dependabot PRs"
+contains "dry-run no merge log" "$([ -f "$GH_FIXTURE/log" ] && cat "$GH_FIXTURE/log" || echo NONE)" "NONE"
 
 echo "---"
 [ "$fails" -eq 0 ] && { echo "all passed"; exit 0; } || { echo "$fails failed"; exit 1; }

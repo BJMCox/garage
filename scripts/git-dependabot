@@ -75,9 +75,65 @@ for r in "${repos[@]}"; do
     [ ${#bn} -gt "$maxn" ] && maxn=${#bn}
 done
 
-# Placeholder body — replaced in Task 2/3.
+# List dependabot PRs for a repo as TSV lines: "<number>\t<mergeable>\t<title>".
+# Uses gh's Go-template output so we need no JSON parser.
+list_prs() {
+    gh pr list --author 'app/dependabot[bot]' --state open \
+        --json number,title,mergeable \
+        --template '{{range .}}{{.number}}{{"\t"}}{{.mergeable}}{{"\t"}}{{.title}}{{"\n"}}{{end}}' \
+        2>/dev/null
+}
+
+# classify one repo, writing status lines + tally marker to stdout.
+classify() {
+    local repo="$1" name prs n state title
+    name="$(basename "$repo")"
+    pf() { printf "%-${maxn}s  %b\n" "$name" "$1"; }
+
+    if ! git -C "$repo" remote get-url origin >/dev/null 2>&1; then
+        pf "${DIM}skip (no github)${Z}"
+        printf '@@T 0 0 0 0 0\n'
+        return
+    fi
+
+    prs="$(cd "$repo" && list_prs)"
+    if [ -z "$prs" ]; then
+        pf "${DIM}no dependabot PRs${Z}"
+        printf '@@T 0 0 0 0 0\n'
+        return
+    fi
+
+    local merged=0 would=0 conflict=0 pending=0 failed=0
+    while IFS="$(printf '\t')" read -r n state title; do
+        [ -z "$n" ] && continue
+        case "$state" in
+        MERGEABLE)
+            if [ "$MERGE" -eq 1 ]; then
+                # filled in Task 3
+                :
+            else
+                pf "${G}would merge #$n${Z} ${DIM}$title${Z}"
+                would=$((would + 1))
+            fi
+            ;;
+        CONFLICTING)
+            pf "${R}conflict #$n${Z} ${DIM}$title${Z}"
+            conflict=$((conflict + 1))
+            ;;
+        *)
+            pf "${Y}pending #$n${Z} ${DIM}$title${Z}"
+            pending=$((pending + 1))
+            ;;
+        esac
+    done <<EOF
+$prs
+EOF
+    printf '@@T %d %d %d %d %d\n' "$merged" "$would" "$conflict" "$pending" "$failed"
+}
+
 for r in "${repos[@]}"; do
-    printf "%-${maxn}s  %s(todo)%s\n" "$(basename "$r")" "$DIM" "$Z"
-done
+    classify "$r"
+done | grep -v '^@@T '
+
 printf "${DIM}— %d repos${Z}\n" "${#repos[@]}"
 exit 0
