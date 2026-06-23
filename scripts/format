@@ -291,7 +291,7 @@ for p in "${PATHS[@]}"; do
             FILES+=("$f")
             SRC+=("found")
         done \
-            < <(find -L "$p" -maxdepth 5 -type d -name '.?*' -prune -o -type f -print0 2>/dev/null | sort -z)
+            < <(find -L "$p" -maxdepth 5 -type d \( -name '.?*' -o -name node_modules -o -name target -o -name build -o -name dist -o -name vendor -o -name __pycache__ -o -name venv \) -prune -o -type f -print0 2>/dev/null | sort -z)
     elif [ -e "$p" ]; then
         FILES+=("$p")
         SRC+=("explicit")
