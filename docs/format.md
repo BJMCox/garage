@@ -102,7 +102,8 @@ Per-file: `✓` formatted (green) · `·` unchanged (dim) · `✗` error (red) �
 files discovered by **recursing a directory** stay silent unless a formatter
 applies — no noise for unknown types. Directory recursion descends **up to 5
 levels deep**, **follows symlinked directories** (`find -L`; symlink loops are
-detected and skipped), and ignores anything under `.git/`. Tokyo Night themed;
+detected and skipped), and skips any hidden directory (dot-prefixed, e.g.
+`.git/`, `.venv/`). Tokyo Night themed;
 honors `NO_COLOR` and non-TTY (no color when piped).
 
 ```
