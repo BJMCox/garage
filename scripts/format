@@ -12,6 +12,7 @@
 # Flags:
 #   -c, --check     don't write; exit non-zero if anything would change
 #   -a, --as LANG   override: py jl json toml rs md yaml js ts css html …
+#   -j, --jobs N    parallel workers (default: CPU count; 1 = sequential)
 #   -l, --list      print the formatter map and exit
 #   -h, --help      this help
 #
@@ -25,6 +26,7 @@ set -u
 
 CHECK=0
 OVERRIDE=""
+JOBS=""
 root_default="."
 PATHS=()
 while [ $# -gt 0 ]; do
@@ -44,6 +46,22 @@ while [ $# -gt 0 ]; do
         }
         OVERRIDE="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"
         shift 2
+        ;;
+    -j | --jobs)
+        [ -n "${2:-}" ] || {
+            echo "format: --jobs requires a number" >&2
+            exit 1
+        }
+        JOBS="$2"
+        shift 2
+        ;;
+    --jobs=*)
+        JOBS="${1#--jobs=}"
+        shift
+        ;;
+    -j*)
+        JOBS="${1#-j}"
+        shift
         ;;
     -l | --list)
         LIST=1
@@ -371,15 +389,12 @@ do_fmt() {
     else RESULT="unchanged"; fi
 }
 
-nfmt=0
-nunch=0
-nwould=0
-nerr=0
-nskip=0
-nnotool=0
-for i in "${!FILES[@]}"; do
-    f="${FILES[$i]}"
-    src="${SRC[$i]}"
+# Per-file worker: detect ext, format, then emit a tally token (line 1) followed
+# by the display line to print (the rest). Token "none" = stay silent (a file
+# found by recursing a dir, with no applicable formatter). Identical output
+# whether run inline (sequential) or backgrounded into a temp file (parallel).
+emit_one() {
+    local f="$1" src="$2" ext base tool RESULT
     if [ -n "$OVERRIDE" ]; then ext="$OVERRIDE"; else
         base="${f##*/}"
         ext="${base##*.}"
@@ -396,40 +411,110 @@ for i in "${!FILES[@]}"; do
 
     case "$RESULT" in
     skip)
-        [ "$src" = explicit ] && {
+        if [ "$src" = explicit ]; then
+            printf 'skip\n'
             printf "%s– %s%s %s(no formatter for .%s)%s\n" "$DIM" "$f" "$Z" "$DIM" "${ext:-?}" "$Z"
-            nskip=$((nskip + 1))
-        }
+        else printf 'none\n'; fi
         ;;
     notool:*)
         tool="${RESULT#notool:}"
-        [ "$src" = explicit ] && {
+        if [ "$src" = explicit ]; then
+            printf 'notool\n'
             printf "%s– %s%s %s(needs %s)%s\n" "$DIM" "$f" "$Z" "$Y" "$tool" "$Z"
-            nnotool=$((nnotool + 1))
-        }
+        else printf 'none\n'; fi
         ;;
     formatted)
+        printf 'fmt\n'
         printf "%s✓%s %s\n" "$G" "$Z" "$f"
-        nfmt=$((nfmt + 1))
         ;;
-    unchanged)
+    unchanged | ok)
+        printf 'unch\n'
         printf "%s·%s %s%s%s\n" "$DIM" "$Z" "$DIM" "$f" "$Z"
-        nunch=$((nunch + 1))
         ;;
     wouldfmt)
+        printf 'would\n'
         printf "%s✓%s %s %s(would format)%s\n" "$Y" "$Z" "$f" "$DIM" "$Z"
-        nwould=$((nwould + 1))
-        ;;
-    ok)
-        printf "%s·%s %s%s%s\n" "$DIM" "$Z" "$DIM" "$f" "$Z"
-        nunch=$((nunch + 1))
         ;;
     error)
+        printf 'err\n'
         printf "%s✗%s %s\n" "$R" "$Z" "$f"
-        nerr=$((nerr + 1))
         ;;
+    *) printf 'none\n' ;;
     esac
+}
+
+# Resolve parallelism: default to the CPU count; -j1 keeps the old sequential
+# path. Files are independent (each tool rewrites only its own file), so the one
+# shared cost is JuliaFormatter's slow probe — warm it once here so parallel .jl
+# workers reuse the cached result instead of each paying for it.
+if [ -z "$JOBS" ]; then
+    JOBS="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)"
+fi
+case "$JOBS" in '' | *[!0-9]*) JOBS=1 ;; esac
+[ "$JOBS" -lt 1 ] && JOBS=1
+if [ "$JOBS" -gt 1 ]; then
+    if [ "$OVERRIDE" = jl ]; then
+        jl_ready >/dev/null 2>&1
+    else
+        for _f in "${FILES[@]}"; do
+            case "${_f##*.}" in jl)
+                jl_ready >/dev/null 2>&1
+                break
+                ;;
+            esac
+        done
+    fi
+fi
+
+# Run every file, capturing each result into resdir/<index> so printed order
+# follows input order no matter the completion order. Parallel mode uses a FIFO
+# token bucket as a bounded pool (bash 3.2 lacks `wait -n`): JOBS tokens
+# circulate; a worker takes one before starting and returns it when done.
+resdir="$(mktemp -d)"
+if [ "$JOBS" -gt 1 ] && [ "${#FILES[@]}" -gt 1 ]; then
+    sem="$resdir/.sem"
+    mkfifo "$sem"
+    exec 9<>"$sem"
+    k=0
+    while [ "$k" -lt "$JOBS" ]; do
+        printf '\n' >&9
+        k=$((k + 1))
+    done
+    for i in "${!FILES[@]}"; do
+        IFS= read -r -u 9 _slot
+        {
+            emit_one "${FILES[$i]}" "${SRC[$i]}" >"$resdir/$i"
+            printf '\n' >&9
+        } &
+    done
+    wait
+    exec 9>&-
+else
+    for i in "${!FILES[@]}"; do
+        emit_one "${FILES[$i]}" "${SRC[$i]}" >"$resdir/$i"
+    done
+fi
+
+nfmt=0
+nunch=0
+nwould=0
+nerr=0
+nskip=0
+nnotool=0
+for i in "${!FILES[@]}"; do
+    [ -f "$resdir/$i" ] || continue
+    { IFS= read -r tok; line="$(cat)"; } <"$resdir/$i"
+    case "$tok" in
+    fmt) nfmt=$((nfmt + 1)) ;;
+    unch) nunch=$((nunch + 1)) ;;
+    would) nwould=$((nwould + 1)) ;;
+    err) nerr=$((nerr + 1)) ;;
+    skip) nskip=$((nskip + 1)) ;;
+    notool) nnotool=$((nnotool + 1)) ;;
+    esac
+    [ -n "$line" ] && printf '%s\n' "$line"
 done
+rm -rf "$resdir"
 
 if [ "$CHECK" -eq 1 ]; then
     printf "${DIM}— %d ok · %d would change · %d errors · %d skipped${Z}\n" "$nunch" "$nwould" "$nerr" "$((nskip + nnotool))"

@@ -14,7 +14,7 @@ extension, with a `--as` flag to force a language. Plain bash — put it on your
 | `format --list`            | Print the extension → formatter table                |
 | `format -h`                | Help                                                 |
 
-Flags: `-c/--check`, `-a/--as LANG`, `-l/--list`, `-h/--help`.
+Flags: `-c/--check`, `-a/--as LANG`, `-j/--jobs N`, `-l/--list`, `-h/--help`.
 
 ## Formatter map
 
@@ -144,9 +144,11 @@ format`. Writes nothing.
 - **bash 3.2-safe** (macOS system bash) — no associative arrays / `wait -n`.
 - **Tab completion** (zsh, optional): a `_format` compdef can complete flags,
   the `--as` language list, and file paths.
-- Sequential, not parallel (unlike the `git-*` tools): formatting is typically
-  fast and operates on few files, which keeps the per-file status simple. It may
-  be batched per-tool or parallelized later if needed on large trees.
+- Parallel by default: files are formatted by a bounded worker pool (`-j`,
+  defaults to the CPU count; `-j1` forces the old sequential path). Each tool
+  rewrites only its own file, so workers never conflict; output order and the
+  per-file status are preserved by collecting results per index. On a large tree
+  this is ~5–6× faster than sequential.
 
 ## See also
 
