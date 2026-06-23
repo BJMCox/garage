@@ -72,16 +72,16 @@ Each operates on the **immediate child directories** of a target dir (default:
 cwd), in parallel. Works as either `git-foo` or, since they're on `PATH` named
 `git-*`, as a native subcommand `git foo`.
 
-| Tool             | What it does                                                                                                                            |
-| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `git-ahead`      | Table of how far each repo's branch is ahead/behind origin's default branch, plus commit ages. `-n` to skip fetching.                   |
-| `git-sync-all`   | Fast-forward every clean repo that's behind its upstream. Never merges, rebases, or touches dirty/diverged repos.                       |
-| `git-status-all` | Working-tree summary across repos: staged / modified / untracked / conflicted counts + stash depth. `-d` for dirty-only.                |
-| `git-tidy`       | Prune stale remote-tracking refs and delete local branches already merged into origin's default. **Dry-run by default**; `-f` to apply. |
-| `git-each`       | Run a git subcommand (or, with `-s`, a shell command) in every repo.                                                                    |
-| `git-clone-all`  | Clone every repo of a GitHub org/user into a directory (via `gh`), in parallel. Skips already-cloned repos — the bootstrap step.         |
+| Tool             | What it does                                                                                                                                                 |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `git-ahead`      | Table of how far each repo's branch is ahead/behind origin's default branch, plus commit ages. `-n` to skip fetching.                                        |
+| `git-sync-all`   | Fast-forward every clean repo that's behind its upstream. Never merges, rebases, or touches dirty/diverged repos.                                            |
+| `git-status-all` | Working-tree summary across repos: staged / modified / untracked / conflicted counts + stash depth. `-d` for dirty-only.                                     |
+| `git-tidy`       | Prune stale remote-tracking refs and delete local branches already merged into origin's default. **Dry-run by default**; `-f` to apply.                      |
+| `git-each`       | Run a git subcommand (or, with `-s`, a shell command) in every repo.                                                                                         |
+| `git-clone-all`  | Clone every repo of a GitHub org/user into a directory (via `gh`), in parallel. Skips already-cloned repos — the bootstrap step.                             |
 | `git-wip`        | Snapshot uncommitted work (tracked + untracked) across repos onto `wip/<ts>` branches, without touching your working tree. An escape hatch before risky ops. |
-| `git-dependabot` | Scan repos for open Dependabot PRs. Dry-run by default; `--merge` to update-branch and squash-merge every conflict-free PR. Requires `gh`, authenticated. |
+| `git-dependabot` | Scan repos for open Dependabot PRs. Dry-run by default; `--merge` to update-branch and squash-merge every conflict-free PR. Requires `gh`, authenticated.    |
 
 ### format
 
@@ -105,7 +105,7 @@ what's installed. Full reference: [docs/format.md](docs/format.md).
 ### lint
 
 The read-only sibling of `format`: dispatches each file **by extension** to the
-right *linter* and reports problems (it never writes). Same machinery as
+right _linter_ and reports problems (it never writes). Same machinery as
 `format` — `--as`, `--list`, graceful skip, shebang detection, dir recursion.
 Exits non-zero if any file has issues, so it works as a CI gate.
 

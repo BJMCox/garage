@@ -4,10 +4,20 @@
 set -u
 SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/scripts/git-dependabot"
 fails=0
-ok()   { printf 'ok   - %s\n' "$1"; }
-bad()  { printf 'FAIL - %s\n' "$1"; fails=$((fails+1)); }
-check(){ if [ "$2" = "$3" ]; then ok "$1"; else bad "$1"; printf '       want: %s\n       got:  %s\n' "$3" "$2"; fi; }
-contains(){ case "$2" in *"$3"*) ok "$1";; *) bad "$1"; printf '       missing %q in:\n%s\n' "$3" "$2";; esac; }
+ok() { printf 'ok   - %s\n' "$1"; }
+bad() {
+    printf 'FAIL - %s\n' "$1"
+    fails=$((fails + 1))
+}
+check() { if [ "$2" = "$3" ]; then ok "$1"; else
+    bad "$1"
+    printf '       want: %s\n       got:  %s\n' "$3" "$2"
+fi; }
+contains() { case "$2" in *"$3"*) ok "$1" ;; *)
+    bad "$1"
+    printf '       missing %q in:\n%s\n' "$3" "$2"
+    ;;
+esac }
 
 # --- fixture helpers -------------------------------------------------------
 # A fake `gh` whose behavior is driven by files under $GH_FIXTURE.
@@ -84,61 +94,74 @@ contains "help shows usage" "$out" "git-dependabot"
 contains "help shows --merge" "$out" "--merge"
 
 # --- test: not a directory -------------------------------------------------
-out="$("$SCRIPT" /no/such/dir 2>&1)"; rc=$?
+out="$("$SCRIPT" /no/such/dir 2>&1)"
+rc=$?
 check "missing dir exits 1" "$rc" "1"
 
 # --- test: dir with no repos ----------------------------------------------
-tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
-out="$("$SCRIPT" "$tmp" 2>&1)"; rc=$?
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+out="$("$SCRIPT" "$tmp" 2>&1)"
+rc=$?
 check "no repos exits 1" "$rc" "1"
 contains "no repos message" "$out" "no git repositories"
 
 # --- test: classification (dry-run) ---------------------------------------
-tmp2="$(mktemp -d)"; bindir="$tmp2/bin"; mkdir -p "$bindir"
+tmp2="$(mktemp -d)"
+bindir="$tmp2/bin"
+mkdir -p "$bindir"
 make_fake_gh "$bindir"
-export GH_FIXTURE="$tmp2/fx"; mkdir -p "$GH_FIXTURE"
-PATH="$bindir:$PATH"; export PATH
+export GH_FIXTURE="$tmp2/fx"
+mkdir -p "$GH_FIXTURE"
+PATH="$bindir:$PATH"
+export PATH
 
-mkrepo "$tmp2/repos/alpha"   # MERGEABLE PR
-mkrepo "$tmp2/repos/beta"    # CONFLICTING PR
-mkrepo "$tmp2/repos/gamma"   # no dependabot PRs
+mkrepo "$tmp2/repos/alpha" # MERGEABLE PR
+mkrepo "$tmp2/repos/beta"  # CONFLICTING PR
+mkrepo "$tmp2/repos/gamma" # no dependabot PRs
 printf '[{"number":7,"title":"bump lodash","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}]\n' >"$GH_FIXTURE/alpha.prs"
-printf '[{"number":9,"title":"bump axios","mergeable":"CONFLICTING","mergeStateStatus":"DIRTY"}]\n'  >"$GH_FIXTURE/beta.prs"
+printf '[{"number":9,"title":"bump axios","mergeable":"CONFLICTING","mergeStateStatus":"DIRTY"}]\n' >"$GH_FIXTURE/beta.prs"
 printf '[]\n' >"$GH_FIXTURE/gamma.prs"
 
 out="$("$SCRIPT" "$tmp2/repos")"
-contains "alpha would-merge"  "$out" "would merge #7 bump lodash"
-contains "beta conflict"      "$out" "conflict #9 bump axios"
-contains "gamma none"         "$out" "no dependabot PRs"
+contains "alpha would-merge" "$out" "would merge #7 bump lodash"
+contains "beta conflict" "$out" "conflict #9 bump axios"
+contains "gamma none" "$out" "no dependabot PRs"
 contains "dry-run no merge log" "$([ -f "$GH_FIXTURE/log" ] && cat "$GH_FIXTURE/log" || echo NONE)" "NONE"
 
 # --- test: --merge acts on MERGEABLE PRs ----------------------------------
-tmp3="$(mktemp -d)"; bindir3="$tmp3/bin"; mkdir -p "$bindir3"
+tmp3="$(mktemp -d)"
+bindir3="$tmp3/bin"
+mkdir -p "$bindir3"
 make_fake_gh "$bindir3"
-GH_FIXTURE="$tmp3/fx"; export GH_FIXTURE; mkdir -p "$GH_FIXTURE"
-PATH="$bindir3:$PATH"; export PATH
-GD_POLL_TRIES=2 GD_POLL_SLEEP=0; export GD_POLL_TRIES GD_POLL_SLEEP
+GH_FIXTURE="$tmp3/fx"
+export GH_FIXTURE
+mkdir -p "$GH_FIXTURE"
+PATH="$bindir3:$PATH"
+export PATH
+GD_POLL_TRIES=2 GD_POLL_SLEEP=0
+export GD_POLL_TRIES GD_POLL_SLEEP
 
 mkrepo "$tmp3/repos/alpha"
 mkrepo "$tmp3/repos/beta"
 printf '[{"number":7,"title":"bump lodash","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}]\n' >"$GH_FIXTURE/alpha.prs"
-printf '[{"number":9,"title":"bump axios","mergeable":"CONFLICTING","mergeStateStatus":"DIRTY"}]\n'  >"$GH_FIXTURE/beta.prs"
+printf '[{"number":9,"title":"bump axios","mergeable":"CONFLICTING","mergeStateStatus":"DIRTY"}]\n' >"$GH_FIXTURE/beta.prs"
 
 out="$("$SCRIPT" --merge "$tmp3/repos")"
-contains "alpha merged line"   "$out" "merged #7"
+contains "alpha merged line" "$out" "merged #7"
 log="$(cat "$GH_FIXTURE/log")"
 contains "alpha update-branch ran" "$log" "update-branch alpha 7"
-contains "alpha squash merge ran"  "$log" "merge alpha 7 --squash --delete-branch"
-case "$log" in *"merge beta"*) bad "beta must NOT merge (conflict)";; *) ok "beta not merged";; esac
+contains "alpha squash merge ran" "$log" "merge alpha 7 --squash --delete-branch"
+case "$log" in *"merge beta"*) bad "beta must NOT merge (conflict)" ;; *) ok "beta not merged" ;; esac
 
 # --- test: footer tally + ordering + exit status --------------------------
-out="$("$SCRIPT" "$tmp2/repos")"   # reuse Task-2 fixture: alpha/beta/gamma
+out="$("$SCRIPT" "$tmp2/repos")" # reuse Task-2 fixture: alpha/beta/gamma
 contains "footer repos count" "$out" "3 repos"
 contains "footer would-merge" "$out" "1 would-merge"
-contains "footer conflict"    "$out" "1 conflict"
+contains "footer conflict" "$out" "1 conflict"
 # ordering: alpha before beta before gamma (directory order)
 a=$(printf '%s\n' "$out" | grep -n 'alpha' | head -1 | cut -d: -f1)
-b=$(printf '%s\n' "$out" | grep -n 'beta'  | head -1 | cut -d: -f1)
+b=$(printf '%s\n' "$out" | grep -n 'beta' | head -1 | cut -d: -f1)
 g=$(printf '%s\n' "$out" | grep -n 'gamma' | head -1 | cut -d: -f1)
 if [ -n "$a" ] && [ -n "$b" ] && [ -n "$g" ] && [ "$a" -lt "$b" ] && [ "$b" -lt "$g" ]; then
     ok "ordered output"
@@ -148,7 +171,9 @@ fi
 
 # exit status: a forced merge failure -> nonzero
 # Build a fresh fake gh that makes `gh pr merge` exit 1 — no sed needed.
-tmp4="$(mktemp -d)"; bindir4="$tmp4/bin"; mkdir -p "$bindir4"
+tmp4="$(mktemp -d)"
+bindir4="$tmp4/bin"
+mkdir -p "$bindir4"
 cat >"$bindir4/gh" <<'GHEOF'
 #!/usr/bin/env bash
 set -u
@@ -207,13 +232,24 @@ esac
 GHEOF
 chmod +x "$bindir4/gh"
 
-GH_FIXTURE="$tmp4/fx"; export GH_FIXTURE; mkdir -p "$GH_FIXTURE"
-PATH="$bindir4:$PATH"; export PATH
-GD_POLL_TRIES=1 GD_POLL_SLEEP=0; export GD_POLL_TRIES GD_POLL_SLEEP
+GH_FIXTURE="$tmp4/fx"
+export GH_FIXTURE
+mkdir -p "$GH_FIXTURE"
+PATH="$bindir4:$PATH"
+export PATH
+GD_POLL_TRIES=1 GD_POLL_SLEEP=0
+export GD_POLL_TRIES GD_POLL_SLEEP
 mkrepo "$tmp4/repos/delta"
 printf '[{"number":3,"title":"bump pkg","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}]\n' >"$GH_FIXTURE/delta.prs"
-"$SCRIPT" --merge "$tmp4/repos" >/dev/null 2>&1; rc=$?
+"$SCRIPT" --merge "$tmp4/repos" >/dev/null 2>&1
+rc=$?
 check "merge failure exits nonzero" "$rc" "1"
 
 echo "---"
-[ "$fails" -eq 0 ] && { echo "all passed"; exit 0; } || { echo "$fails failed"; exit 1; }
+[ "$fails" -eq 0 ] && {
+    echo "all passed"
+    exit 0
+} || {
+    echo "$fails failed"
+    exit 1
+}

@@ -25,37 +25,37 @@ developed on macOS); any package manager works just as well — your distributio
 repos, the tool's own ecosystem (`pipx`/`npm`/`cargo`/`go`/`rustup`), or its
 official installer. Run `format --list` to see which are detected on your system.
 
-| Extensions                                                         | Formatter                    | Install (one option)              |
-| ------------------------------------------------------------------ | ---------------------------- | --------------------------------- |
-| `.py` `.ipynb`                                                     | `ruff` (notebooks too)       | `brew install ruff`               |
+| Extensions                                                         | Formatter                    | Install (one option)                              |
+| ------------------------------------------------------------------ | ---------------------------- | ------------------------------------------------- |
+| `.py` `.ipynb`                                                     | `ruff` (notebooks too)       | `brew install ruff`                               |
 | `.jl`                                                              | `julia` + **JuliaFormatter** | `julia -e 'using Pkg; Pkg.add("JuliaFormatter")'` |
-| `.json .jsonc .json5 .hs3`                                         | `prettier`                   | `brew install prettier`           |
-| `.toml`                                                            | `taplo`                      | `brew install taplo`              |
-| `.rs`                                                              | `rustfmt`                    | `rustup component add rustfmt`    |
-| `.md .mdx .yaml/.yml .html .css/.scss/.less .js/.ts/.vue .graphql` | `prettier`                   | `brew install prettier`           |
-| `.tex`                                                             | `tex-fmt`                    | `brew install tex-fmt`            |
-| `.bib`                                                             | `bibtex-tidy`                | `brew install bibtex-tidy`        |
-| `.sh .bash`                                                        | `shfmt`                      | `brew install shfmt`              |
-| `CMakeLists.txt .cmake`                                            | `gersemi`                    | `brew install gersemi`            |
-| `.c .cpp .h .cu .cuh .cc .cxx .hpp …`                              | `clang-format`               | `brew install clang-format`       |
-| `.f90 .f95 .f03 .f08 .f .for`                                      | `fprettify`                  | `brew install fprettify`          |
-| `.R .r`                                                            | `air` (Posit's R formatter)  | `brew install air`                |
-| `.sql`                                                             | `sqlfluff` (dialect `ansi`)  | `brew install sqlfluff`           |
-| `.typ`                                                             | `typstyle`                   | `brew install typstyle`           |
-| `.nix`                                                             | `nixfmt`                     | `brew install nixfmt`             |
-| `.proto`                                                           | `buf`                        | `brew install buf`                |
-| `.go`                                                              | `gofumpt`                    | `brew install gofumpt`            |
-| `.lua`                                                             | `stylua`                     | `brew install stylua`             |
-| `.zig`                                                             | `zig fmt`                    | `brew install zig`                |
-| `.swift`                                                           | `swift-format`               | `brew install swift-format`       |
-| `.java`                                                            | `google-java-format`         | `brew install google-java-format` |
-| `.kt .kts`                                                         | `ktlint`                     | `brew install ktlint`             |
-| `.hs`                                                              | `ormolu`                     | `brew install ormolu`             |
-| `.pl .pm`                                                          | `perltidy`                   | `brew install perltidy`           |
-| `.xml`                                                             | `xmllint --format`           | libxml2 (usually preinstalled)    |
-| `.tf .tfvars`                                                      | `tofu fmt` (OpenTofu)        | `brew install opentofu`           |
-| `.v .sv .svh`                                                      | `verible-verilog-format`     | [chipsalliance/verible releases]  |
-| `.rb`                                                              | `rufo`                       | `gem install rufo`                |
+| `.json .jsonc .json5 .hs3`                                         | `prettier`                   | `brew install prettier`                           |
+| `.toml`                                                            | `taplo`                      | `brew install taplo`                              |
+| `.rs`                                                              | `rustfmt`                    | `rustup component add rustfmt`                    |
+| `.md .mdx .yaml/.yml .html .css/.scss/.less .js/.ts/.vue .graphql` | `prettier`                   | `brew install prettier`                           |
+| `.tex`                                                             | `tex-fmt`                    | `brew install tex-fmt`                            |
+| `.bib`                                                             | `bibtex-tidy`                | `brew install bibtex-tidy`                        |
+| `.sh .bash`                                                        | `shfmt`                      | `brew install shfmt`                              |
+| `CMakeLists.txt .cmake`                                            | `gersemi`                    | `brew install gersemi`                            |
+| `.c .cpp .h .cu .cuh .cc .cxx .hpp …`                              | `clang-format`               | `brew install clang-format`                       |
+| `.f90 .f95 .f03 .f08 .f .for`                                      | `fprettify`                  | `brew install fprettify`                          |
+| `.R .r`                                                            | `air` (Posit's R formatter)  | `brew install air`                                |
+| `.sql`                                                             | `sqlfluff` (dialect `ansi`)  | `brew install sqlfluff`                           |
+| `.typ`                                                             | `typstyle`                   | `brew install typstyle`                           |
+| `.nix`                                                             | `nixfmt`                     | `brew install nixfmt`                             |
+| `.proto`                                                           | `buf`                        | `brew install buf`                                |
+| `.go`                                                              | `gofumpt`                    | `brew install gofumpt`                            |
+| `.lua`                                                             | `stylua`                     | `brew install stylua`                             |
+| `.zig`                                                             | `zig fmt`                    | `brew install zig`                                |
+| `.swift`                                                           | `swift-format`               | `brew install swift-format`                       |
+| `.java`                                                            | `google-java-format`         | `brew install google-java-format`                 |
+| `.kt .kts`                                                         | `ktlint`                     | `brew install ktlint`                             |
+| `.hs`                                                              | `ormolu`                     | `brew install ormolu`                             |
+| `.pl .pm`                                                          | `perltidy`                   | `brew install perltidy`                           |
+| `.xml`                                                             | `xmllint --format`           | libxml2 (usually preinstalled)                    |
+| `.tf .tfvars`                                                      | `tofu fmt` (OpenTofu)        | `brew install opentofu`                           |
+| `.v .sv .svh`                                                      | `verible-verilog-format`     | [chipsalliance/verible releases]                  |
+| `.rb`                                                              | `rufo`                       | `gem install rufo`                                |
 
 Notes:
 
@@ -63,7 +63,7 @@ Notes:
   avoid two tools disagreeing on style.
 - `CMakeLists.txt` is matched by **name** (it has no extension).
 - `air` is Posit's R formatter — not the Go live-reload tool of the same name.
-- `.hs3` is treated as JSON (a project-specific alias; see *Extension aliases*).
+- `.hs3` is treated as JSON (a project-specific alias; see _Extension aliases_).
 
 **Extensionless files** are dispatched by their **shebang**: a file with no
 extension whose first line is e.g. `#!/usr/bin/env bash` is treated as `sh`

@@ -196,12 +196,12 @@ The bootstrap step the other tools assume: `git clone-all` a directory full of
 repos, then `git ahead` / `sync-all` / `status-all` / `tidy` across them.
 Requires the GitHub CLI (`gh`), authenticated.
 
-| Command                          | Action                                       |
-| -------------------------------- | -------------------------------------------- |
-| `git clone-all OWNER [DIR]`      | Clone OWNER's repos into DIR (default: cwd)  |
-| `git-clone-all --ssh OWNER`      | Use SSH clone URLs instead of HTTPS          |
-| `git-clone-all --limit N OWNER`  | Cap the number of repos (default: 1000)      |
-| `git-clone-all -h`               | Help                                         |
+| Command                         | Action                                      |
+| ------------------------------- | ------------------------------------------- |
+| `git clone-all OWNER [DIR]`     | Clone OWNER's repos into DIR (default: cwd) |
+| `git-clone-all --ssh OWNER`     | Use SSH clone URLs instead of HTTPS         |
+| `git-clone-all --limit N OWNER` | Cap the number of repos (default: 1000)     |
+| `git-clone-all -h`              | Help                                        |
 
 ```
 $ git clone-all acme ~/src
@@ -227,13 +227,13 @@ nothing can be lost. For each repo with changes (tracked **or** untracked),
 branch at it — **without touching your working tree, index, or current branch**
 (the tree is built in a temporary index). Clean repos are skipped.
 
-| Command                | Action                                       |
-| ---------------------- | -------------------------------------------- |
-| `git wip [DIR]`        | Snapshot repos with changes under DIR        |
-| `git-wip -m MSG [DIR]` | Use a custom snapshot commit message         |
-| `git-wip --list [DIR]` | List existing `wip/<ts>` branches across repos |
-| `git-wip --prune [DIR]`| Delete every `wip/<ts>` branch across repos  |
-| `git-wip -h`           | Help                                         |
+| Command                 | Action                                         |
+| ----------------------- | ---------------------------------------------- |
+| `git wip [DIR]`         | Snapshot repos with changes under DIR          |
+| `git-wip -m MSG [DIR]`  | Use a custom snapshot commit message           |
+| `git-wip --list [DIR]`  | List existing `wip/<ts>` branches across repos |
+| `git-wip --prune [DIR]` | Delete every `wip/<ts>` branch across repos    |
+| `git-wip -h`            | Help                                           |
 
 ```
 $ git wip ~/src
@@ -261,11 +261,11 @@ Scan a directory of repos for open Dependabot PRs and, with `--merge`, bring
 each conflict-free PR up to date with its base branch and squash-merge it.
 **Dry-run by default** — reports what would happen without touching anything.
 
-| Command                          | Action                                                         |
-| -------------------------------- | -------------------------------------------------------------- |
-| `git dependabot [DIR]`           | Report open Dependabot PRs under DIR (default: cwd)            |
-| `git-dependabot --merge [DIR]`   | Update-branch + squash-merge every mergeable PR under DIR      |
-| `git-dependabot -h`              | Help                                                           |
+| Command                        | Action                                                    |
+| ------------------------------ | --------------------------------------------------------- |
+| `git dependabot [DIR]`         | Report open Dependabot PRs under DIR (default: cwd)       |
+| `git-dependabot --merge [DIR]` | Update-branch + squash-merge every mergeable PR under DIR |
+| `git-dependabot -h`            | Help                                                      |
 
 ```
 $ git dependabot ~/src

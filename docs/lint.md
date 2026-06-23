@@ -6,12 +6,12 @@ the right linter **by extension** and reports problems. It never writes —
 
 ## Usage
 
-| Command                  | Action                                          |
-| ------------------------ | ----------------------------------------------- |
-| `lint [PATH…]`           | Lint files / recurse dirs (default: cwd)        |
-| `lint --as LANG [PATH…]` | Force LANG's linter, ignore extensions          |
+| Command                  | Action                                              |
+| ------------------------ | --------------------------------------------------- |
+| `lint [PATH…]`           | Lint files / recurse dirs (default: cwd)            |
+| `lint --as LANG [PATH…]` | Force LANG's linter, ignore extensions              |
 | `lint --list`            | Print the extension → linter table + install status |
-| `lint -h`                | Help                                            |
+| `lint -h`                | Help                                                |
 
 Flags: `-a/--as LANG`, `-l/--list`, `-h/--help`.
 
@@ -22,16 +22,16 @@ Every linter is optional and installed separately. The **Install** column shows
 manager works — your distribution's repos, the tool's own ecosystem, or its
 official installer. Run `lint --list` to see which are detected.
 
-| Extensions          | Linter          | Install (one option)            |
-| ------------------- | --------------- | ------------------------------- |
-| `.py`               | `ruff check`    | `brew install ruff`             |
-| `.sh .bash`         | `shellcheck`    | `brew install shellcheck`       |
-| `.toml`             | `taplo lint`    | `brew install taplo`            |
-| `.yaml .yml`        | `yamllint`      | `brew install yamllint`         |
-| `.json .jsonc .json5 .hs3` | `jq` (validity) | `brew install jq`        |
-| `.lua`              | `luacheck`      | `brew install luacheck`         |
-| `Dockerfile`        | `hadolint`      | `brew install hadolint`         |
-| `.md .markdown`     | `markdownlint`  | `brew install markdownlint-cli` |
+| Extensions                 | Linter          | Install (one option)            |
+| -------------------------- | --------------- | ------------------------------- |
+| `.py`                      | `ruff check`    | `brew install ruff`             |
+| `.sh .bash`                | `shellcheck`    | `brew install shellcheck`       |
+| `.toml`                    | `taplo lint`    | `brew install taplo`            |
+| `.yaml .yml`               | `yamllint`      | `brew install yamllint`         |
+| `.json .jsonc .json5 .hs3` | `jq` (validity) | `brew install jq`               |
+| `.lua`                     | `luacheck`      | `brew install luacheck`         |
+| `Dockerfile`               | `hadolint`      | `brew install hadolint`         |
+| `.md .markdown`            | `markdownlint`  | `brew install markdownlint-cli` |
 
 A linter is only invoked if its tool is on `PATH`; an uninstalled one degrades to
 `– (needs <tool>)` and is skipped (run `lint --list` to see status).
