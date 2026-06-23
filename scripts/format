@@ -503,7 +503,10 @@ nskip=0
 nnotool=0
 for i in "${!FILES[@]}"; do
     [ -f "$resdir/$i" ] || continue
-    { IFS= read -r tok; line="$(cat)"; } <"$resdir/$i"
+    {
+        IFS= read -r tok
+        line="$(cat)"
+    } <"$resdir/$i"
     case "$tok" in
     fmt) nfmt=$((nfmt + 1)) ;;
     unch) nunch=$((nunch + 1)) ;;
