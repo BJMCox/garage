@@ -121,6 +121,7 @@ fi
 # --- git-clone-all (no network; arg handling only) ------------------------
 want_rc 0 "git-clone-all -h runs" git-clone-all -h
 want_rc 1 "git-clone-all without owner → exit 1" git-clone-all
+want_rc 0 "git-pr-all -h runs" git-pr-all -h
 
 # --- git-wip --------------------------------------------------------------
 want_rc 0 "git-wip -h runs" git-wip -h

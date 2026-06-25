@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+# git-pr-all — table of open PRs across every repo in a directory.
+#              Grouped by repo, one line per PR. Companion to git-ahead /
+#              git-status-all. Requires gh (authenticated) and jq.
+#
+# Usage:
+#   git-pr-all [DIR]           all open PRs under DIR (default: cwd)
+#   git-pr-all --mine [DIR]    only authored by @me
+#   git-pr-all --review [DIR]  only where @me review is requested
+#   git pr-all [DIR]           same (git discovers git-* on PATH)
+#   git-pr-all -h | --help     help
+#
+# Honors NO_COLOR and non-TTY output.
+set -u
+
+MINE=0
+REVIEW=0
+root=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+    -h | --help)
+        awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$0"
+        exit 0
+        ;;
+    --mine)   MINE=1 ;;
+    --review) REVIEW=1 ;;
+    -*)
+        printf 'git-pr-all: unknown option: %s\n' "$1" >&2
+        exit 2
+        ;;
+    *)
+        if [ -z "$root" ]; then
+            root="$1"
+        else
+            printf 'git-pr-all: too many arguments\n' >&2
+            exit 2
+        fi
+        ;;
+    esac
+    shift
+done
+
+if [ "$MINE" -eq 1 ] && [ "$REVIEW" -eq 1 ]; then
+    printf 'git-pr-all: --mine and --review are mutually exclusive\n' >&2
+    exit 2
+fi
+
+root="${root:-.}"
+[ -d "$root" ] || {
+    printf 'git-pr-all: not a directory: %s\n' "$root" >&2
+    exit 1
+}
+
+command -v gh  >/dev/null || { printf 'git-pr-all: gh not found (brew install gh)\n'  >&2; exit 1; }
+command -v jq  >/dev/null || { printf 'git-pr-all: jq not found (brew install jq)\n'  >&2; exit 1; }
+
+# Tokyo Night 24-bit truecolor palette; honors NO_COLOR and non-TTY.
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    Y=$'\033[38;2;224;175;104m'
+    DIM=$'\033[38;2;86;95;137m'
+    BOLD=$'\033[1;38;2;192;202;245m'
+    Z=$'\033[0m'
+else
+    Y='' DIM='' BOLD='' Z=''
+fi
+
+# Collect repos under $root. If $root itself is a git repo, use that.
+repos=()
+if [ -d "$root/.git" ] || git -C "$root" rev-parse --git-dir >/dev/null 2>&1; then
+    repos+=("$root")
+else
+    for d in "$root"/*/; do
+        [ -d "${d%/}/.git" ] || git -C "${d%/}" rev-parse --git-dir >/dev/null 2>&1 || continue
+        repos+=("${d%/}")
+    done
+fi
+[ ${#repos[@]} -eq 0 ] && {
+    printf 'git-pr-all: no git repositories under %s\n' "'$root'" >&2
+    exit 1
+}
+
+# Age from ISO-8601 UTC timestamp; macOS BSD date only.
+age_str() {
+    local created="$1" now then_stamp diff
+    now=$(date +%s)
+    then_stamp=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$created" +%s 2>/dev/null) || { printf '?'; return 0; }
+    diff=$(( now - then_stamp ))
+    if   [ "$diff" -lt 3600   ]; then printf '%dm' "$(( diff / 60 ))"
+    elif [ "$diff" -lt 86400  ]; then printf '%dh' "$(( diff / 3600 ))"
+    elif [ "$diff" -lt 604800 ]; then printf '%dd' "$(( diff / 86400 ))"
+    else                               printf '%dw' "$(( diff / 604800 ))"
+    fi
+}
+
+NUM_W=5
+TITLE_W=50
+AUTHOR_W=15
+AGE_W=3
+
+# Spawn one subshell per repo; each writes TSV to a temp file.
+tmpdir=$(mktemp -d)
+trap 'rm -rf "$tmpdir"' EXIT
+pids=()
+tmps=()
+
+for repo in "${repos[@]}"; do
+    tmp="$tmpdir/$(basename "$repo")"
+    tmps+=("$tmp")
+    (
+        owner_repo=$(cd "$repo" && gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null)
+        if [ -z "$owner_repo" ]; then
+            printf 'NOREPO\n' >"$tmp"
+            exit 0
+        fi
+        if [ "$MINE" -eq 1 ]; then
+            json=$(gh pr list -R "$owner_repo" --author @me \
+                --json number,title,author,createdAt,isDraft 2>/dev/null) || json='[]'
+        elif [ "$REVIEW" -eq 1 ]; then
+            json=$(gh pr list -R "$owner_repo" --search "review-requested:@me" \
+                --json number,title,author,createdAt,isDraft 2>/dev/null) || json='[]'
+        else
+            json=$(gh pr list -R "$owner_repo" \
+                --json number,title,author,createdAt,isDraft 2>/dev/null) || json='[]'
+        fi
+        printf '%s' "$json" | jq -r \
+            '.[] | [(.number|tostring), .title, .author.login, .createdAt, (.isDraft|tostring)] | @tsv' \
+            >"$tmp"
+    ) &
+    pids+=($!)
+done
+
+for pid in "${pids[@]}"; do wait "$pid"; done
+
+# Print in directory order.
+i=0
+for repo in "${repos[@]}"; do
+    tmp="${tmps[$i]}"
+    i=$(( i + 1 ))
+    name=$(basename "$repo")
+
+    # Skip repos with no GitHub remote.
+    [ -f "$tmp" ] && [ "$(head -1 "$tmp" 2>/dev/null)" = "NOREPO" ] && continue
+
+    printf '%s%s%s\n' "$BOLD" "$name" "$Z"
+
+    if [ ! -f "$tmp" ] || [ ! -s "$tmp" ]; then
+        printf '  %s(no open PRs)%s\n' "$DIM" "$Z"
+    else
+        while IFS=$'\t' read -r num title author created draft; do
+            [ "${#title}" -gt "$TITLE_W" ] && title="${title:0:$(( TITLE_W - 1 ))}…"
+            age=$(age_str "$created")
+            draft_tag=""
+            [ "$draft" = "true" ] && draft_tag=" ${Y}[DRAFT]${Z}"
+            printf '  %s#%-*s%s %-*s %s%-*s%s %*s%s\n' \
+                "$DIM" "$NUM_W" "$num" "$Z" \
+                "$TITLE_W" "$title" \
+                "$DIM" "$AUTHOR_W" "$author" "$Z" \
+                "$AGE_W" "$age" \
+                "$draft_tag"
+        done <"$tmp"
+    fi
+    printf '\n'
+done
