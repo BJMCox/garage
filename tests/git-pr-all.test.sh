@@ -115,7 +115,8 @@ contains "shows author"                 "$out" "alice"
 contains "shows DRAFT badge"            "$out" "[DRAFT]"
 contains "shows worker no PRs line"     "$out" "(no open PRs)"
 contains "shows React PR"               "$out" "Migrate to React 18"
-not_contains "no DRAFT on normal PR"    "$out" "#7$(printf '\t').*DRAFT"
+line_7=$(printf '%s\n' "$out" | grep '#7' || true)
+not_contains "no DRAFT on normal PR" "$line_7" "[DRAFT]"
 
 # --- test: title truncation ------------------------------------------------
 cat >"$GH_FIXTURE/api.prs" <<'FIXTURE'
