@@ -89,11 +89,11 @@ header_rule() {
 
 analyze() {
     local repo="$1" out="$2"
-    local name branch log_args max_ts=0 block="" count=0
+    local name log_args max_ts=0 block="" count=0 nyours=0
 
     name="$(basename "$repo")"
-    log_args="-${LAST} --format=%ct%n%aN%n%ae%n%s"
-    [ "$ALL_BRANCHES" -eq 1 ] && log_args="--all $log_args"
+    log_args=(-"${LAST}" "--format=%ct%n%aN%n%ae%n%s")
+    [ "$ALL_BRANCHES" -eq 1 ] && log_args=(--all "${log_args[@]}")
 
     # Read commits: each is 4 lines (timestamp, author name, author email, subject).
     local ts author_name author_email subject
@@ -104,6 +104,7 @@ analyze() {
         age="$(age_str "$ts")"
         if [ -n "$MY_EMAIL" ] && [ "$author_email" = "$MY_EMAIL" ]; then
             author_color="$ACCENT"
+            nyours=$(( nyours + 1 ))
         else
             author_color="$DIM"
         fi
@@ -113,7 +114,7 @@ analyze() {
             "$subject")"
         block="${block}${line}"$'\n'
         count=$(( count + 1 ))
-    done < <(git -C "$repo" log $log_args 2>/dev/null)
+    done < <(git -C "$repo" log "${log_args[@]}" 2>/dev/null)
 
     # Skip repos with no commits in range.
     [ "$count" -eq 0 ] && { printf '@@SKIP\n' >"$out"; return; }
@@ -123,6 +124,7 @@ analyze() {
     {
         printf '@@TS %s\n' "$max_ts"
         printf '@@C %s\n' "$count"
+        printf '@@Y %s\n' "$nyours"
         header_rule "$name" "$repo_age"
         printf '%s' "$block"
         printf '\n'
@@ -165,21 +167,13 @@ while IFS=' ' read -r ts path; do
     count_line="$(sed -n '2p' "$path")"          # @@C N
     block_count="${count_line#@@C }"
     ncommits=$(( ncommits + block_count ))
-    tail -n +3 "$path"                            # skip @@TS and @@C lines
+    yours_line="$(sed -n '3p' "$path")"          # @@Y N
+    block_yours="${yours_line#@@Y }"
+    nyours=$(( nyours + block_yours ))
+    tail -n +4 "$path"                            # skip @@TS, @@C, @@Y lines
     nrepos=$(( nrepos + 1 ))
 done < <(sort -rn "$sortfile")
 rm -f "$sortfile"
-
-# Count yours separately (simpler: recount from MY_EMAIL in all repos).
-if [ -n "$MY_EMAIL" ]; then
-    log_args="-${LAST} --format=%ae"
-    [ "$ALL_BRANCHES" -eq 1 ] && log_args="--all $log_args"
-    for repo in "${repos[@]}"; do
-        while IFS= read -r email; do
-            [ "$email" = "$MY_EMAIL" ] && nyours=$(( nyours + 1 ))
-        done < <(git -C "$repo" log $log_args 2>/dev/null)
-    done
-fi
 
 printf '%s— %d repos · %d commits · %d yours%s\n' \
     "$DIM" "$nrepos" "$ncommits" "$nyours" "$Z"
