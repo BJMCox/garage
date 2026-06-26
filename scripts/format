@@ -6,6 +6,8 @@
 #   format [PATH...]            format files / recurse dirs (default: cwd)
 #   format --check [PATH...]    report what would change; write nothing
 #   format --as LANG [PATH...]  force LANG's formatter (ignore extensions)
+#   format --changed [PATH...]  format only git-modified files (vs HEAD)
+#   format --staged [PATH...]   format only staged files
 #   format --list               show the extension → formatter table
 #   format -h                   help
 #
@@ -25,6 +27,8 @@
 set -u
 
 CHECK=0
+CHANGED=0
+STAGED=0
 OVERRIDE=""
 JOBS=""
 root_default="."
@@ -37,6 +41,14 @@ while [ $# -gt 0 ]; do
         ;;
     -c | --check)
         CHECK=1
+        shift
+        ;;
+    --changed)
+        CHANGED=1
+        shift
+        ;;
+    --staged)
+        STAGED=1
         shift
         ;;
     -a | --as)
@@ -84,6 +96,11 @@ while [ $# -gt 0 ]; do
         ;;
     esac
 done
+
+if [ "$CHANGED" -eq 1 ] && [ "$STAGED" -eq 1 ]; then
+    echo "format: --changed and --staged are mutually exclusive" >&2
+    exit 1
+fi
 
 # Tokyo Night palette (24-bit truecolor); honors NO_COLOR and non-TTY output.
 # shellcheck disable=SC2034  # shared palette; not every color is used in each tool
@@ -303,21 +320,49 @@ jl_ready() {
 FILES=()
 SRC=()
 nmissing=0
-for p in "${PATHS[@]}"; do
-    if [ -d "$p" ]; then
-        while IFS= read -r -d '' f; do
-            FILES+=("$f")
-            SRC+=("found")
-        done \
-            < <(find -L "$p" -maxdepth 5 -type d \( -name '.?*' -o -name node_modules -o -name target -o -name build -o -name dist -o -name vendor -o -name __pycache__ -o -name venv \) -prune -o -type f -print0 2>/dev/null | sort -z)
-    elif [ -e "$p" ]; then
-        FILES+=("$p")
-        SRC+=("explicit")
-    else
-        echo "format: no such path: $p" >&2
-        nmissing=$((nmissing + 1))
+if [ "$CHANGED" -eq 1 ] || [ "$STAGED" -eq 1 ]; then
+    if ! git rev-parse --git-dir >/dev/null 2>&1; then
+        echo "format: not in a git repository" >&2
+        exit 1
     fi
-done
+    git_root="$(git rev-parse --show-toplevel)"
+    changed_files=()
+    while IFS= read -r f; do
+        [ -f "$f" ] || continue          # skip deleted files
+        changed_files+=("$f")
+    done < <(
+        if [ "$STAGED" -eq 1 ]; then
+            git diff --name-only --cached --diff-filter=d | sed "s|^|$git_root/|"
+        else
+            git diff --name-only HEAD --diff-filter=d | sed "s|^|$git_root/|"
+        fi
+    )
+    if [ ${#changed_files[@]} -eq 0 ]; then
+        echo "format: no changed files" >&2
+        exit 0
+    fi
+    # Override FILES/SRC directly — skip the normal path expansion below.
+    FILES=("${changed_files[@]}")
+    SRC=()
+    for _ in "${changed_files[@]}"; do SRC+=("explicit"); done
+    nmissing=0
+else
+    for p in "${PATHS[@]}"; do
+        if [ -d "$p" ]; then
+            while IFS= read -r -d '' f; do
+                FILES+=("$f")
+                SRC+=("found")
+            done \
+                < <(find -L "$p" -maxdepth 5 -type d \( -name '.?*' -o -name node_modules -o -name target -o -name build -o -name dist -o -name vendor -o -name __pycache__ -o -name venv \) -prune -o -type f -print0 2>/dev/null | sort -z)
+        elif [ -e "$p" ]; then
+            FILES+=("$p")
+            SRC+=("explicit")
+        else
+            echo "format: no such path: $p" >&2
+            nmissing=$((nmissing + 1))
+        fi
+    done
+fi
 
 # RESULT is set by do_fmt: formatted | unchanged | wouldfmt | ok | error | skip | notool:<x>
 # Every tool exposes just ONE in-place command (run_writer). Write mode runs it

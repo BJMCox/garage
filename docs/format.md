@@ -6,15 +6,19 @@ extension, with a `--as` flag to force a language. Plain bash — put it on your
 
 ## Usage
 
-| Command                    | Action                                               |
-| -------------------------- | ---------------------------------------------------- |
-| `format [PATH…]`           | Format files / recurse dirs (default: cwd), in place |
-| `format --check [PATH…]`   | Report what would change; write nothing              |
-| `format --as LANG [PATH…]` | Force LANG's formatter, ignore extensions            |
-| `format --list`            | Print the extension → formatter table                |
-| `format -h`                | Help                                                 |
+| Command                      | Action                                               |
+| ---------------------------- | ---------------------------------------------------- |
+| `format [PATH…]`             | Format files / recurse dirs (default: cwd), in place |
+| `format --check [PATH…]`     | Report what would change; write nothing              |
+| `format --changed [PATH…]`   | Format only git-modified files (staged + unstaged vs HEAD) |
+| `format --staged [PATH…]`    | Format only staged files                             |
+| `format --as LANG [PATH…]`   | Force LANG's formatter, ignore extensions            |
+| `format --list`              | Print the extension → formatter table                |
+| `format -h`                  | Help                                                 |
 
-Flags: `-c/--check`, `-a/--as LANG`, `-j/--jobs N`, `-l/--list`, `-h/--help`.
+Flags: `-c/--check`, `--changed`, `--staged`, `-a/--as LANG`, `-j/--jobs N`, `-l/--list`, `-h/--help`.
+
+`--changed` and `--staged` require a git repository; deleted files are excluded automatically (`--diff-filter=d`). Combining `--changed` and `--staged` is an error.
 
 ## Formatter map
 

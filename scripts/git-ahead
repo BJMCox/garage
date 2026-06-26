@@ -7,28 +7,42 @@
 #   git-ahead [DIR]        scan immediate subdirectories of DIR (default: cwd)
 #   git ahead [DIR]        same thing (git discovers git-* on PATH)
 #   git-ahead -n [DIR]     no fetch — use cached remote refs (fast/offline)
+#   git-ahead --open [DIR]     also open GitHub comparison for ahead repos
 #   git-ahead -h           help
 #
 # Compares the CURRENT branch of each repo against origin's default branch.
 set -u
 
 FETCH=1
-case "${1:-}" in
--h | --help)
-    awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$0"
-    exit 0
-    ;;
--n | --no-fetch)
-    FETCH=0
-    shift
-    ;;
-esac
+OPEN=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+    -h | --help)
+        awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$0"
+        exit 0
+        ;;
+    -n | --no-fetch) FETCH=0; shift ;;
+    --open)          OPEN=1;  shift ;;
+    -*)
+        printf 'git-ahead: unknown flag: %s\n' "$1" >&2
+        exit 1
+        ;;
+    *)
+        break
+        ;;
+    esac
+done
 
 root="${1:-.}"
 [ -d "$root" ] || {
     echo "git-ahead: not a directory: $root" >&2
     exit 1
 }
+
+if [ "$OPEN" -eq 1 ] && ! command -v open >/dev/null 2>&1; then
+    printf 'git-ahead: --open requires macOS open command\n' >&2
+    exit 1
+fi
 
 # Tokyo Night palette (24-bit truecolor); honors NO_COLOR and non-TTY output.
 # shellcheck disable=SC2034  # shared palette; not every color is used in each tool
@@ -228,3 +242,19 @@ done
 
 printf "${DIM}— %d repos · %d ahead · %d behind · %d dirty${Z}\n" \
     "${#NAME[@]}" "$nahead" "$nbehind" "$ndirty"
+
+if [ "$OPEN" -eq 1 ] && [ "$nahead" -gt 0 ]; then
+    printf "${DIM}opening %d comparison(s)...${Z}\n" "$nahead" >&2
+    for i in "${!NAME[@]}"; do
+        [ "${ST[$i]}" = "ahead" ] || continue
+        repo="${repos[$i]}"
+        remote_url="$(git -C "$repo" remote get-url origin 2>/dev/null)"
+        [ -z "$remote_url" ] && continue
+        gh_url="$(printf '%s' "$remote_url" | sed 's#git@github\.com:#https://github.com/#; s#\.git$##; s#https://github\.com/##')"
+        full_url="https://github.com/${gh_url}"
+        branch="${BR[$i]}"
+        def_branch="$(git -C "$repo" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')"
+        [ -z "$def_branch" ] && def_branch="main"
+        open "${full_url}/compare/${def_branch}...${branch}" 2>/dev/null
+    done
+fi

@@ -8,8 +8,10 @@
 #   git wip [DIR]          same (git discovers git-* on PATH)
 #   git-wip -m MSG [DIR]   use a custom snapshot commit message
 #   git-wip --list [DIR]   list existing wip/<ts> branches across repos
-#   git-wip --prune [DIR]  delete every wip/<ts> branch across repos
-#   git-wip -h             help
+#   git-wip --prune [DIR]              delete every wip/<ts> branch across repos
+#   git-wip --restore [DIR]            restore working tree from a wip/* branch
+#   git-wip --restore BRANCH [DIR]     restore from a specific wip branch
+#   git-wip -h                         help
 #
 # For each repo with uncommitted changes (tracked or untracked), git-wip records
 # a commit capturing the full working tree (via a temporary index, so the real
@@ -21,6 +23,7 @@ set -u
 
 MSG=""
 MODE=snapshot
+RESTORE_BRANCH=""
 case "${1:-}" in
 -h | --help)
     awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$0"
@@ -33,6 +36,13 @@ case "${1:-}" in
 -p | --prune)
     MODE=prune
     shift
+    ;;
+-r | --restore)
+    MODE=restore
+    shift
+    case "${1:-}" in
+    wip/*) RESTORE_BRANCH="$1"; shift ;;
+    esac
     ;;
 -m | --message)
     [ -n "${2:-}" ] || {
@@ -73,14 +83,16 @@ branch="wip/$ts"
 [ -n "$MSG" ] || MSG="wip snapshot $ts"
 
 repos=()
-for d in "$root"/*/; do
-    [ -d "$d/.git" ] || git -C "$d" rev-parse --git-dir >/dev/null 2>&1 || continue
-    repos+=("${d%/}")
-done
-[ ${#repos[@]} -eq 0 ] && {
-    echo "git-wip: no git repositories under '$root'" >&2
-    exit 1
-}
+if [ "$MODE" != restore ]; then
+    for d in "$root"/*/; do
+        [ -d "$d/.git" ] || git -C "$d" rev-parse --git-dir >/dev/null 2>&1 || continue
+        repos+=("${d%/}")
+    done
+    [ ${#repos[@]} -eq 0 ] && {
+        echo "git-wip: no git repositories under '$root'" >&2
+        exit 1
+    }
+fi
 
 # --- list mode: show existing wip/* branches across repos -----------------
 if [ "$MODE" = list ]; then
@@ -127,6 +139,54 @@ $brs
 EOF
     done
     printf "${DIM}— pruned %d wip branch(es) across %d repo(s)${Z}\n" "$total" "$nrepos"
+    exit 0
+fi
+
+# --- restore mode: restore working tree from a wip/* branch in one repo ------
+if [ "$MODE" = restore ]; then
+    # Resolve repo: must be a single git repo, not a directory of repos.
+    repo=""
+    if [ -d "$root/.git" ] || git -C "$root" rev-parse --git-dir >/dev/null 2>&1; then
+        repo="$root"
+    else
+        printf 'git-wip: %s is not a git repository (use a repo path, not a directory of repos)\n' "'$root'" >&2
+        exit 1
+    fi
+
+    if [ -n "$RESTORE_BRANCH" ]; then
+        # Validate the named branch exists.
+        git -C "$repo" rev-parse --verify "refs/heads/$RESTORE_BRANCH" >/dev/null 2>&1 || {
+            printf 'git-wip: branch %s not found\n' "$RESTORE_BRANCH" >&2
+            exit 1
+        }
+        selected="$RESTORE_BRANCH"
+    else
+        brs="$(git -C "$repo" for-each-ref --sort=-committerdate \
+            --format='%(refname:short)' 'refs/heads/wip/*' 2>/dev/null)"
+        if [ -z "$brs" ]; then
+            printf 'git-wip: no wip branches found in %s\n' "$(basename "$repo")"
+            exit 0
+        fi
+        count="$(printf '%s\n' "$brs" | grep -c .)"
+        if [ "$count" -eq 1 ]; then
+            selected="$brs"
+            printf '%susing%s %s\n' "$DIM" "$Z" "$selected"
+        elif command -v fzf >/dev/null 2>&1; then
+            selected="$(printf '%s\n' "$brs" | fzf --reverse --prompt 'wip branch> ')" || exit 0
+        else
+            printf 'git-wip: multiple wip branches — pass the branch name or install fzf:\n' >&2
+            printf '%s\n' "$brs" >&2
+            exit 1
+        fi
+    fi
+
+    n="$(git -C "$repo" diff --name-only HEAD "$selected" 2>/dev/null | grep -c .)"
+    git -C "$repo" checkout "$selected" -- . 2>/dev/null || {
+        printf '%s✗%s restore failed\n' "$R" "$Z" >&2
+        exit 1
+    }
+    printf '%s✓%s restored from %s%s%s  %s(%d files)%s\n' \
+        "$G" "$Z" "$BOLD" "$selected" "$Z" "$DIM" "$n" "$Z"
     exit 0
 fi
 

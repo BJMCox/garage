@@ -6,14 +6,18 @@ the right linter **by extension** and reports problems. It never writes —
 
 ## Usage
 
-| Command                  | Action                                              |
-| ------------------------ | --------------------------------------------------- |
-| `lint [PATH…]`           | Lint files / recurse dirs (default: cwd)            |
-| `lint --as LANG [PATH…]` | Force LANG's linter, ignore extensions              |
-| `lint --list`            | Print the extension → linter table + install status |
-| `lint -h`                | Help                                                |
+| Command                    | Action                                              |
+| -------------------------- | --------------------------------------------------- |
+| `lint [PATH…]`             | Lint files / recurse dirs (default: cwd)            |
+| `lint --changed [PATH…]`   | Lint only git-modified files (staged + unstaged vs HEAD) |
+| `lint --staged [PATH…]`    | Lint only staged files                              |
+| `lint --as LANG [PATH…]`   | Force LANG's linter, ignore extensions              |
+| `lint --list`              | Print the extension → linter table + install status |
+| `lint -h`                  | Help                                                |
 
-Flags: `-a/--as LANG`, `-l/--list`, `-h/--help`.
+Flags: `--changed`, `--staged`, `-a/--as LANG`, `-l/--list`, `-h/--help`.
+
+`--changed` and `--staged` require a git repository; deleted files are excluded automatically. Combining both is an error.
 
 ## Linter map
 

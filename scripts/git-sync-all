@@ -4,23 +4,38 @@
 #                rebases). Companion to git-ahead.
 #
 # Usage:
-#   git-sync-all [DIR]     fast-forward repos under DIR (default: cwd)
-#   git sync-all [DIR]     same (git discovers git-* on PATH)
-#   git-sync-all -h        help
+#   git-sync-all [DIR]           fast-forward repos under DIR (default: cwd)
+#   git-sync-all --force [DIR]   attempt pull even on dirty repos (ff may fail)
+#   git-sync-all --stash [DIR]   stash dirty repos, pull, pop stash
+#   git sync-all [DIR]           same (git discovers git-* on PATH)
+#   git-sync-all -h              help
 #
 # For each repo it fetches origin, then `merge --ff-only` the current branch
-# from its tracking upstream (@{u}) — only when the working tree is clean and
-# the branch is strictly behind (a true fast-forward).
+# from its tracking upstream (@{u}) — only when the branch is strictly behind
+# (a true fast-forward). Clean repos only unless --force is given.
 set -u
 
-case "${1:-}" in
--h | --help)
-    awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$0"
-    exit 0
-    ;;
-esac
+force=0
+stash=0
+args=()
+for arg in "$@"; do
+    case "$arg" in
+    -h | --help)
+        awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$0"
+        exit 0
+        ;;
+    --force | -f) force=1 ;;
+    --stash)      stash=1 ;;
+    -*) printf 'git-sync-all: unknown flag: %s\n' "$arg" >&2; exit 1 ;;
+    *) args+=("$arg") ;;
+    esac
+done
+if [ "$force" -eq 1 ] && [ "$stash" -eq 1 ]; then
+    printf 'git-sync-all: --force and --stash are mutually exclusive\n' >&2
+    exit 1
+fi
 
-root="${1:-.}"
+root="${args[0]:-.}"
 [ -d "$root" ] || {
     echo "git-sync-all: not a directory: $root" >&2
     exit 1
@@ -68,7 +83,7 @@ done
 # its status line plus a "@@T <pulled> <skipped>" tally to an index-named temp
 # file; the main loop prints them in directory order and sums the counts.
 analyze() {
-    local repo="$1" out="$2" name branch behind ahead
+    local repo="$1" out="$2" force_flag="$3" stash_flag="$4" name branch behind ahead dirty stashed
     name="$(basename "$repo")"
     g() { git -C "$repo" "$@" 2>/dev/null; }
     pf() { printf "%-${maxn}s  %b\n" "$name" "$1"; }
@@ -79,11 +94,23 @@ analyze() {
             printf '@@T 0 1\n'
             exit 0
         }
-        [ -n "$(g status --porcelain)" ] && {
+        dirty="$(g status --porcelain)"
+        if [ -n "$dirty" ] && [ "$force_flag" -eq 0 ] && [ "$stash_flag" -eq 0 ]; then
             pf "${Y}skip (dirty)${Z}"
             printf '@@T 0 1\n'
             exit 0
-        }
+        fi
+
+        stashed=0
+        if [ -n "$dirty" ] && [ "$stash_flag" -eq 1 ]; then
+            if g stash push --include-untracked -m "git-sync-all auto-stash" >/dev/null 2>&1; then
+                stashed=1
+            else
+                pf "${Y}skip (stash failed)${Z}"
+                printf '@@T 0 1\n'
+                exit 0
+            fi
+        fi
         if ! g rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1; then
             pf "${DIM}skip (no upstream)${Z}"
             printf '@@T 0 1\n'
@@ -101,9 +128,17 @@ analyze() {
             pf "${R}skip (diverged: +$ahead -$behind)${Z}"
             printf '@@T 0 1\n'
         elif g merge --ff-only '@{u}' >/dev/null 2>&1; then
-            pf "${G}pulled $behind${Z}"
+            if [ "$stashed" -eq 1 ]; then
+                g stash pop >/dev/null 2>&1
+                pf "${G}pulled $behind${Z} ${Y}(unstashed)${Z}"
+            elif [ -n "$dirty" ]; then
+                pf "${G}pulled $behind${Z} ${Y}(dirty)${Z}"
+            else
+                pf "${G}pulled $behind${Z}"
+            fi
             printf '@@T 1 0\n'
         else
+            [ "$stashed" -eq 1 ] && g stash pop >/dev/null 2>&1
             pf "${R}ff failed${Z}"
             printf '@@F 1\n'
         fi
@@ -116,7 +151,7 @@ nproc=8
 j=0
 for i in "${!repos[@]}"; do
     printf -v idx '%05d' "$i"
-    analyze "${repos[$i]}" "$tmp/$idx" &
+    analyze "${repos[$i]}" "$tmp/$idx" "$force" "$stash" &
     j=$((j + 1))
     [ $((j % nproc)) -eq 0 ] && wait
 done

@@ -7,6 +7,8 @@
 # Usage:
 #   lint [PATH...]            lint files / recurse dirs (default: cwd)
 #   lint --as LANG [PATH...]  force a language (ignore extensions)
+#   lint --changed [PATH...]  lint only git-modified files (vs HEAD)
+#   lint --staged [PATH...]   lint only staged files
 #   lint --list               show the extension → linter table + install status
 #   lint -h                   help
 #
@@ -21,6 +23,8 @@
 set -u
 
 OVERRIDE=""
+CHANGED=0
+STAGED=0
 PATHS=()
 LIST=0
 while [ $# -gt 0 ]; do
@@ -28,6 +32,14 @@ while [ $# -gt 0 ]; do
     -h | --help)
         awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$0"
         exit 0
+        ;;
+    --changed)
+        CHANGED=1
+        shift
+        ;;
+    --staged)
+        STAGED=1
+        shift
         ;;
     -a | --as)
         [ -n "${2:-}" ] || {
@@ -58,6 +70,11 @@ while [ $# -gt 0 ]; do
         ;;
     esac
 done
+
+if [ "$CHANGED" -eq 1 ] && [ "$STAGED" -eq 1 ]; then
+    echo "lint: --changed and --staged are mutually exclusive" >&2
+    exit 1
+fi
 
 # Tokyo Night palette (24-bit truecolor); honors NO_COLOR and non-TTY output.
 # shellcheck disable=SC2034  # shared palette; not every color is used in each tool
@@ -150,20 +167,48 @@ fi
 FILES=()
 SRC=()
 nmissing=0
-for p in "${PATHS[@]}"; do
-    if [ -d "$p" ]; then
-        while IFS= read -r -d '' f; do
-            FILES+=("$f")
-            SRC+=("found")
-        done < <(find -L "$p" -maxdepth 5 -type f -not -path '*/.git/*' -print0 2>/dev/null | sort -z)
-    elif [ -e "$p" ]; then
-        FILES+=("$p")
-        SRC+=("explicit")
-    else
-        echo "lint: no such path: $p" >&2
-        nmissing=$((nmissing + 1))
+if [ "$CHANGED" -eq 1 ] || [ "$STAGED" -eq 1 ]; then
+    if ! git rev-parse --git-dir >/dev/null 2>&1; then
+        echo "lint: not in a git repository" >&2
+        exit 1
     fi
-done
+    git_root="$(git rev-parse --show-toplevel)"
+    changed_files=()
+    while IFS= read -r f; do
+        [ -f "$f" ] || continue          # skip deleted files
+        changed_files+=("$f")
+    done < <(
+        if [ "$STAGED" -eq 1 ]; then
+            git diff --name-only --cached --diff-filter=d | sed "s|^|$git_root/|"
+        else
+            git diff --name-only HEAD --diff-filter=d | sed "s|^|$git_root/|"
+        fi
+    )
+    if [ ${#changed_files[@]} -eq 0 ]; then
+        echo "lint: no changed files" >&2
+        exit 0
+    fi
+    # Override FILES/SRC directly — skip the normal path expansion below.
+    FILES=("${changed_files[@]}")
+    SRC=()
+    for _ in "${changed_files[@]}"; do SRC+=("explicit"); done
+    nmissing=0
+else
+    for p in "${PATHS[@]}"; do
+        if [ -d "$p" ]; then
+            while IFS= read -r -d '' f; do
+                FILES+=("$f")
+                SRC+=("found")
+            done < <(find -L "$p" -maxdepth 5 -type f -not -path '*/.git/*' -print0 2>/dev/null | sort -z)
+        elif [ -e "$p" ]; then
+            FILES+=("$p")
+            SRC+=("explicit")
+        else
+            echo "lint: no such path: $p" >&2
+            nmissing=$((nmissing + 1))
+        fi
+    done
+fi
 
 nclean=0
 nissue=0
