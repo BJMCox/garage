@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# git-activity — recent commits across every repo in a directory, grouped by
+#                repo and sorted by most recent activity. All authors shown;
+#                your commits highlighted. Companion to git-ahead / git-status-all.
+#
+# Usage:
+#   git-activity [DIR]           last 10 commits per repo (default: cwd)
+#   git-activity --last N [DIR]  last N commits per repo
+#   git-activity --all [DIR]     include all branches, not just current
+#   git activity [DIR]           same (git discovers git-* on PATH)
+#   git-activity -h              help
+set -u
+
+LAST=10
+ALL_BRANCHES=0
+args=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+    -h | --help)
+        awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$0"
+        exit 0
+        ;;
+    --last)
+        shift
+        LAST="${1:?--last requires a number}"
+        shift
+        ;;
+    --all) ALL_BRANCHES=1; shift ;;
+    -*) printf 'git-activity: unknown flag: %s\n' "$1" >&2; exit 1 ;;
+    *)  args+=("$1"); shift ;;
+    esac
+done
+root="${args[0]:-.}"
+
+[ -d "$root" ] || { printf 'git-activity: not a directory: %s\n' "$root" >&2; exit 1; }
+
+# Palette — 24-bit truecolor; suppressed when not a TTY or NO_COLOR is set.
+# shellcheck disable=SC2034
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    R=$'\033[38;2;247;118;142m'
+    G=$'\033[38;2;158;206;106m'
+    Y=$'\033[38;2;224;175;104m'
+    ACCENT=$'\033[38;2;122;162;247m'
+    DIM=$'\033[38;2;86;95;137m'
+    BOLD=$'\033[1;38;2;192;202;245m'
+    Z=$'\033[0m'
+else
+    R=; G=; Y=; ACCENT=; DIM=; BOLD=; Z=
+fi
+
+MY_EMAIL="$(git config --global user.email 2>/dev/null || true)"
+
+repos=()
+for d in "$root"/*/; do
+    [ -d "$d/.git" ] || git -C "$d" rev-parse --git-dir >/dev/null 2>&1 || continue
+    repos+=("${d%/}")
+done
+
+if [ ${#repos[@]} -eq 0 ]; then
+    printf 'git-activity: no git repositories under %s\n' "$root" >&2
+    exit 1
+fi
