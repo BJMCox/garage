@@ -58,5 +58,5 @@ done
 
 if [ ${#repos[@]} -eq 0 ]; then
     printf 'git-activity: no git repositories under %s\n' "$root" >&2
-    exit 1
+    exit 0
 fi
