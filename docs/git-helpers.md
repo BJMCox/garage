@@ -48,11 +48,14 @@ subcommand (`git ahead`).
 How far each repo's **current branch** is from origin's default branch, plus
 how fresh the latest local and remote commits are.
 
-| Command              | Action                                              |
-| -------------------- | --------------------------------------------------- |
-| `git ahead [DIR]`    | Table for repos under DIR (fetches first, parallel) |
-| `git-ahead -n [DIR]` | No fetch — cached refs (fast, offline)              |
-| `git-ahead -h`       | Help                                                |
+| Command                  | Action                                              |
+| ------------------------ | --------------------------------------------------- |
+| `git ahead [DIR]`        | Table for repos under DIR (fetches first, parallel) |
+| `git-ahead -n [DIR]`     | No fetch — cached refs (fast, offline)              |
+| `git-ahead --open [DIR]` | Also open GitHub comparison URL for ahead repos     |
+| `git-ahead -h`           | Help                                                |
+
+`--open` uses macOS `open` to launch `github.com/<owner>/<repo>/compare/<default>...<branch>` for every repo in `ahead` status. Supports SSH and HTTPS remotes.
 
 ```
 Repo               Branch             Ahead  Behind  D  Local  Remote  Status
@@ -77,10 +80,14 @@ Fetches origin, then `merge --ff-only` each repo's current branch from its
 tracking upstream (`@{u}`) — **only** when the tree is clean and the branch is
 strictly behind. Never merges, rebases, or touches dirty/diverged repos.
 
-| Command              | Action                                |
-| -------------------- | ------------------------------------- |
-| `git sync-all [DIR]` | Fast-forward eligible repos under DIR |
-| `git-sync-all -h`    | Help                                  |
+| Command                       | Action                                             |
+| ----------------------------- | -------------------------------------------------- |
+| `git sync-all [DIR]`          | Fast-forward eligible repos under DIR              |
+| `git-sync-all --force [DIR]`  | Attempt ff-only even on dirty repos (may fail)     |
+| `git-sync-all --stash [DIR]`  | Stash dirty repos, pull, pop stash after           |
+| `git-sync-all -h`             | Help                                               |
+
+`--force` and `--stash` are mutually exclusive. With `--stash`: if `git stash push --include-untracked` fails the repo is skipped; on success the output reads `pulled N (unstashed)`. With `--force` on a dirty repo, ff may still fail (e.g. if staged changes conflict) — shown as `ff failed`.
 
 ```
 julia-mcp  up to date
@@ -189,6 +196,37 @@ repo prints a red `[exit N]` and is tallied in the footer.
 
 ---
 
+## git-activity — recent commits across repos
+
+What you (and your collaborators) have been committing across every repo,
+grouped by repo and sorted by most recent activity. Your commits are
+highlighted in accent blue; others are dimmed.
+
+| Command                       | Action                                      |
+| ----------------------------- | ------------------------------------------- |
+| `git activity [DIR]`          | Last 10 commits per repo under DIR          |
+| `git-activity --last N [DIR]` | Last N commits per repo                     |
+| `git-activity --all [DIR]`    | Include all branches, not just current      |
+| `git-activity -h`             | Help                                        |
+
+```
+─── willow ──────────────────── 2h ago ──
+  2h  bcox        add --stash flag to git-sync-all
+  3h  bcox        implement git-wip --restore
+  5h  alice       fix epub rendering edge case
+
+─── scholar-mcp ─────────────── 1d ago ──
+  1d  bcox        fix field_gaps timeout handling
+
+— 2 repos · 4 commits · 3 yours
+```
+
+Your email is read from `git config --global user.email`. Repos with no
+commits in the window are omitted. Column widths: age 4 chars, author 11
+chars (truncated), subject fills the rest.
+
+---
+
 ## git-clone-all — bootstrap a directory of repos
 
 Clone every repo owned by a GitHub org/user into a directory, in **parallel**.
@@ -227,13 +265,17 @@ nothing can be lost. For each repo with changes (tracked **or** untracked),
 branch at it — **without touching your working tree, index, or current branch**
 (the tree is built in a temporary index). Clean repos are skipped.
 
-| Command                 | Action                                         |
-| ----------------------- | ---------------------------------------------- |
-| `git wip [DIR]`         | Snapshot repos with changes under DIR          |
-| `git-wip -m MSG [DIR]`  | Use a custom snapshot commit message           |
-| `git-wip --list [DIR]`  | List existing `wip/<ts>` branches across repos |
-| `git-wip --prune [DIR]` | Delete every `wip/<ts>` branch across repos    |
-| `git-wip -h`            | Help                                           |
+| Command                          | Action                                              |
+| -------------------------------- | --------------------------------------------------- |
+| `git wip [DIR]`                  | Snapshot repos with changes under DIR               |
+| `git-wip -m MSG [DIR]`           | Use a custom snapshot commit message                |
+| `git-wip --list [DIR]`           | List existing `wip/<ts>` branches across repos      |
+| `git-wip --prune [DIR]`          | Delete every `wip/<ts>` branch across repos         |
+| `git-wip --restore [DIR]`        | Restore working tree from a wip branch (fzf picker) |
+| `git-wip --restore BRANCH [DIR]` | Restore from a specific named wip branch            |
+| `git-wip -h`                     | Help                                                |
+
+`--restore` operates on a single repo (DIR must be a git repo, not a directory of repos). If multiple wip branches exist and `fzf` is on PATH, an interactive picker appears. On success: `git checkout <branch> -- .` is applied and the file count is shown. The wip branch is **not** deleted automatically — run `--prune` separately.
 
 ```
 $ git wip ~/src
@@ -252,6 +294,42 @@ Exits 1 if any snapshot failed (e.g. a repo with no configured git identity).
 
 To manage accumulated snapshots, `git wip --list` shows every `wip/<ts>` branch
 across the repos (with relative age), and `git wip --prune` deletes them all.
+
+---
+
+## git-pr-all — open PRs across repos
+
+List every open pull request across a directory of repos in a single table. Requires the GitHub CLI (`gh`), authenticated.
+
+| Command                    | Action                                    |
+| -------------------------- | ----------------------------------------- |
+| `git pr-all [DIR]`         | Table of open PRs under DIR               |
+| `git-pr-all --mine [DIR]`  | Only PRs authored by you                  |
+| `git-pr-all --review [DIR]`| Only PRs requesting your review           |
+| `git-pr-all -h`            | Help                                      |
+
+```
+#142  Add dark mode toggle          alice    2d  ✓
+#139  Bump ruff from 0.3 to 0.4     dependabot  5d  ·
+#137  Fix login redirect            bob      8d  ✗  [DRAFT]
+— 3 repos · 3 PRs
+```
+
+Columns: Number · Title (truncated to 50 chars) · Author · Age · CI status (`✓` all passed, `✗` any failed, `·` pending, blank if no checks) · `[DRAFT]` badge. Parallel `gh pr list` per repo, output printed in directory order.
+
+---
+
+## prj — repo picker
+
+Interactive repo picker backed by `fzf`. Jumps you into a repo in a new shell (or prints the path for scripting).
+
+| Command        | Action                                    |
+| -------------- | ----------------------------------------- |
+| `prj`          | Pick from repos under cwd                 |
+| `prj QUERY`    | Pre-filter with QUERY                     |
+| `prj -d DIR`   | Pick from repos under DIR                 |
+
+The fzf preview pane shows dirty status (`● dirty` in yellow / `· clean` in green), current branch, `git status --short` output, and the last 12 commits. `Enter` opens a new shell in the selected repo.
 
 ---
 

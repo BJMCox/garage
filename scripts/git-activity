@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+# git-activity — recent commits across every repo in a directory, grouped by
+#                repo and sorted by most recent activity. All authors shown;
+#                your commits highlighted. Companion to git-ahead / git-status-all.
+#
+# Usage:
+#   git-activity [DIR]           last 10 commits per repo (default: cwd)
+#   git-activity --last N [DIR]  last N commits per repo
+#   git-activity --all [DIR]     include all branches, not just current
+#   git activity [DIR]           same (git discovers git-* on PATH)
+#   git-activity -h              help
+set -u
+
+LAST=10
+ALL_BRANCHES=0
+args=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+    -h | --help)
+        awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$0"
+        exit 0
+        ;;
+    --last)
+        shift
+        LAST="${1:?--last requires a number}"
+        case "$LAST" in
+            ''|*[!0-9]*) printf 'git-activity: --last requires a positive integer\n' >&2; exit 1 ;;
+        esac
+        shift
+        ;;
+    --all) ALL_BRANCHES=1; shift ;;
+    -*) printf 'git-activity: unknown flag: %s\n' "$1" >&2; exit 1 ;;
+    *)  args+=("$1"); shift ;;
+    esac
+done
+root="${args[0]:-.}"
+
+[ -d "$root" ] || { printf 'git-activity: not a directory: %s\n' "$root" >&2; exit 1; }
+
+# Palette — 24-bit truecolor; suppressed when not a TTY or NO_COLOR is set.
+# shellcheck disable=SC2034
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    R=$'\033[38;2;247;118;142m'
+    G=$'\033[38;2;158;206;106m'
+    Y=$'\033[38;2;224;175;104m'
+    ACCENT=$'\033[38;2;122;162;247m'
+    DIM=$'\033[38;2;86;95;137m'
+    BOLD=$'\033[1;38;2;192;202;245m'
+    Z=$'\033[0m'
+else
+    R=; G=; Y=; ACCENT=; DIM=; BOLD=; Z=
+fi
+
+MY_EMAIL="$(git config --global user.email 2>/dev/null || true)"
+
+repos=()
+for d in "$root"/*/; do
+    [ -d "$d/.git" ] || git -C "$d" rev-parse --git-dir >/dev/null 2>&1 || continue
+    repos+=("${d%/}")
+done
+
+if [ ${#repos[@]} -eq 0 ]; then
+    printf 'git-activity: no git repositories under %s\n' "$root" >&2
+    exit 0
+fi
+
+# Compact relative age from a Unix timestamp.
+age_str() {
+    local ts="$1" now delta
+    now="$(date +%s)"
+    delta=$(( now - ts ))
+    if   [ "$delta" -lt 3600 ];        then printf '%dm'  $(( delta / 60 ))
+    elif [ "$delta" -lt 86400 ];       then printf '%dh'  $(( delta / 3600 ))
+    elif [ "$delta" -lt 604800 ];      then printf '%dd'  $(( delta / 86400 ))
+    elif [ "$delta" -lt 2592000 ];     then printf '%dw'  $(( delta / 604800 ))
+    elif [ "$delta" -lt 31536000 ];    then printf '%dmo' $(( delta / 2592000 ))
+    else                                    printf '%dy'  $(( delta / 31536000 ))
+    fi
+}
+
+# Draw a header rule: "─── NAME ─── AGE ──"
+header_rule() {
+    local name="$1" age="$2" width="${3:-72}"
+    local left="─── ${name} "
+    local right=" ${age} ──"
+    local fill=$(( width - ${#left} - ${#right} ))
+    [ "$fill" -lt 0 ] && fill=0
+    local dashes
+    printf -v dashes '%*s' "$fill" ''
+    printf '%s%s%s%s%s\n' "${DIM}" "${left}" "${dashes// /─}" "${right}" "${Z}"
+}
+
+analyze() {
+    local repo="$1" out="$2"
+    local name log_args max_ts=0 block="" count=0 nyours=0
+
+    name="$(basename "$repo")"
+    log_args=(-"${LAST}" "--format=%ct%n%aN%n%ae%n%s")
+    [ "$ALL_BRANCHES" -eq 1 ] && log_args=(--all "${log_args[@]}")
+
+    # Read commits: each is 4 lines (timestamp, author name, author email, subject).
+    local ts author_name author_email subject
+    while IFS= read -r ts && IFS= read -r author_name && IFS= read -r author_email && IFS= read -r subject; do
+        [ -z "$ts" ] && continue
+        [ "$ts" -gt "$max_ts" ] && max_ts="$ts"
+        local age line author_color
+        age="$(age_str "$ts")"
+        if [ -n "$MY_EMAIL" ] && [ "$author_email" = "$MY_EMAIL" ]; then
+            author_color="$ACCENT"
+            nyours=$(( nyours + 1 ))
+        else
+            author_color="$DIM"
+        fi
+        line="$(printf '  %-4s  %s%-11s%s  %s' \
+            "$age" \
+            "$author_color" "${author_name:0:11}" "$Z" \
+            "$subject")"
+        block="${block}${line}"$'\n'
+        count=$(( count + 1 ))
+    done < <(git -C "$repo" log "${log_args[@]}" 2>/dev/null)
+
+    # Skip repos with no commits in range.
+    [ "$count" -eq 0 ] && { printf '@@SKIP\n' >"$out"; return; }
+
+    local repo_age
+    repo_age="$(age_str "$max_ts")"
+    {
+        printf '@@TS %s\n' "$max_ts"
+        printf '@@C %s\n' "$count"
+        printf '@@Y %s\n' "$nyours"
+        header_rule "$name" "$repo_age"
+        printf '%s' "$block"
+        printf '\n'
+    } >"$out"
+}
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
+nproc=8
+j=0
+for i in "${!repos[@]}"; do
+    printf -v idx '%05d' "$i"
+    analyze "${repos[$i]}" "$tmp/$idx" &
+    j=$(( j + 1 ))
+    [ $(( j % nproc )) -eq 0 ] && wait
+done
+wait
+
+# Collect non-skipped blocks with their sort key (timestamp).
+sortfile="$tmp/sort"
+for i in "${!repos[@]}"; do
+    printf -v idx '%05d' "$i"
+    [ -f "$tmp/$idx" ] || continue
+    first="$(head -1 "$tmp/$idx")"
+    case "$first" in
+    '@@SKIP') continue ;;
+    '@@TS '*)
+        ts="${first#@@TS }"
+        printf '%s %s/%s\n' "$ts" "$tmp" "$idx" >>"$sortfile"
+        ;;
+    esac
+done
+
+# Sort by timestamp descending (most recent repo first), print blocks.
+nrepos=0
+ncommits=0
+nyours=0
+while IFS=' ' read -r ts path; do
+    count_line="$(sed -n '2p' "$path")"          # @@C N
+    block_count="${count_line#@@C }"
+    ncommits=$(( ncommits + block_count ))
+    yours_line="$(sed -n '3p' "$path")"          # @@Y N
+    block_yours="${yours_line#@@Y }"
+    nyours=$(( nyours + block_yours ))
+    tail -n +4 "$path"                            # skip @@TS, @@C, @@Y lines
+    nrepos=$(( nrepos + 1 ))
+done < <(sort -rn "$sortfile")
+rm -f "$sortfile"
+
+printf '%s— %d repos · %d commits · %d yours%s\n' \
+    "$DIM" "$nrepos" "$ncommits" "$nyours" "$Z"
