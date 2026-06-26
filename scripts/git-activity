@@ -23,6 +23,9 @@ while [ $# -gt 0 ]; do
     --last)
         shift
         LAST="${1:?--last requires a number}"
+        case "$LAST" in
+            ''|*[!0-9]*) printf 'git-activity: --last requires a positive integer\n' >&2; exit 1 ;;
+        esac
         shift
         ;;
     --all) ALL_BRANCHES=1; shift ;;
@@ -145,7 +148,7 @@ done
 wait
 
 # Collect non-skipped blocks with their sort key (timestamp).
-sortfile="$(mktemp)"
+sortfile="$tmp/sort"
 for i in "${!repos[@]}"; do
     printf -v idx '%05d' "$i"
     [ -f "$tmp/$idx" ] || continue
